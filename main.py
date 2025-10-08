@@ -46,11 +46,20 @@ class QuoteStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.images_dir = self.root / "images"
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.avatars_dir = self.root / "avatars"
+        self.avatars_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir = self.root / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.file = self.root / "quotes.json"
         self._http = http_client
         self._lock = asyncio.Lock()
         if not self.file.exists():
             self._write({"quotes": []})
+        # 内存缓存
+        try:
+            self._quotes: List[Dict[str, Any]] = self._read().get("quotes", [])
+        except Exception:
+            self._quotes = []
 
     def images_rel(self, filename: str, group_key: Optional[str] = None) -> str:
         """返回相对 data 目录的路径，按群分目录：quotes/images/<group_key>/<filename>。"""
@@ -131,21 +140,18 @@ class QuoteStore:
 
     async def add(self, q: Quote):
         async with self._lock:
-            data = self._read()
-            data.setdefault("quotes", []).append(asdict(q))
-            self._write(data)
+            self._quotes.append(asdict(q))
+            self._write({"quotes": self._quotes})
 
     async def random_one(self) -> Optional[Quote]:
-        data = self._read()
-        arr = data.get("quotes", [])
+        arr = self._quotes
         if not arr:
             return None
         obj = random.choice(arr)
         return Quote(**obj)
 
     async def random_one_by_qq(self, qq: str) -> Optional[Quote]:
-        data = self._read()
-        arr = [x for x in data.get("quotes", []) if str(x.get("qq") or "") == str(qq)]
+        arr = [x for x in self._quotes if str(x.get("qq") or "") == str(qq)]
         if not arr:
             return None
         obj = random.choice(arr)
@@ -153,14 +159,38 @@ class QuoteStore:
 
     async def delete_by_id(self, qid: str) -> bool:
         async with self._lock:
-            data = self._read()
-            arr = data.get("quotes", [])
-            new_arr = [x for x in arr if str(x.get("id")) != str(qid)]
-            if len(new_arr) == len(arr):
+            old_len = len(self._quotes)
+            self._quotes = [x for x in self._quotes if str(x.get("id")) != str(qid)]
+            if len(self._quotes) == old_len:
                 return False
-            data["quotes"] = new_arr
-            self._write(data)
+            self._write({"quotes": self._quotes})
             return True
+
+    async def get_avatar_uri(self, qq: str, enable_cache: bool = True) -> str:
+        """返回头像的本地 file:// URI（若已缓存或成功下载），否则返回 qlogo 远程 URL。"""
+        size = 640
+        remote = f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s={size}"
+        if not enable_cache:
+            return remote
+        try:
+            p = self.avatars_dir / f"{qq}.png"
+            if p.exists():
+                return p.as_uri()
+            if self._http is None:
+                import httpx
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.get(remote)
+                    resp.raise_for_status()
+                    p.write_bytes(resp.content)
+                    return p.as_uri()
+            else:
+                resp = await self._http.get(remote)
+                resp.raise_for_status()
+                p.write_bytes(resp.content)
+                return p.as_uri()
+        except Exception as e:
+            logger.info(f"头像缓存失败，回退远程: {e}")
+            return remote
 
 
 @register(
@@ -186,13 +216,22 @@ class QuotesPlugin(Star):
         self.store = QuoteStore(data_root, http_client=self.http_client)
         self.avatar_provider = (self.config.get("avatar_provider") or "qlogo").lower()
         self.img_cfg = (self.config.get("image") or {})
+        self.perf_cfg = (self.config.get("performance") or {})
+        self._cfg_text_mode = bool(self.perf_cfg.get("text_mode", False))
+        self._cfg_render_cache = bool(self.perf_cfg.get("render_cache", True))
+        self._cfg_avatar_cache = bool(self.perf_cfg.get("avatar_cache", True))
+        self._cfg_avatar_enabled = bool((self.config.get("avatar") or {}).get("enabled", True))
         # 发送记录：避免在消息中暴露 qid，通过会话最近记录辅助删除
         self._pending_qid: Dict[str, str] = {}
         self._last_sent_qid: Dict[str, str] = {}
 
     async def initialize(self):
-        """可选：异步初始化。"""
-        pass
+        """可选：异步初始化。预热渲染器，降低首条渲染延迟。"""
+        try:
+            minimal = "<div style=\"width:320px;height:120px;background:#000;color:#fff\">init</div>"
+            await self.html_render(minimal, {}, options={"full_page": False, "clip": {"x":0,"y":0,"width":320,"height":120}})
+        except Exception:
+            pass
 
     # ============= 指令 =============
     @filter.command_group("quote")
@@ -308,8 +347,36 @@ class QuotesPlugin(Star):
                     return
             except Exception as e:
                 logger.info(f"随机原图发送失败，回退渲染：{e}")
-        # 回退：渲染语录图
+        # 回退：渲染语录图（支持文本模式/渲染缓存）
+        if self._cfg_text_mode:
+            yield event.plain_result(f"「{q.text}」 — {q.name}")
+            return
+        cache_path = self.store.cache_dir / f"{q.id}.png"
+        if self._cfg_render_cache and cache_path.exists():
+            yield event.chain_result([Comp.Image.fromFileSystem(str(cache_path))])
+            return
         img_url = await self._render_quote_image(q)
+        # 尝试缓存渲染结果
+        try:
+            if self._cfg_render_cache:
+                if img_url.startswith("file://"):
+                    from urllib.parse import urlparse, unquote
+                    p = urlparse(img_url)
+                    local_path = Path(unquote(p.path))
+                    if local_path.exists():
+                        cache_path.write_bytes(local_path.read_bytes())
+                        yield event.chain_result([Comp.Image.fromFileSystem(str(cache_path))])
+                        return
+                else:
+                    if self.http_client is not None and img_url.startswith("http"):
+                        r = await self.http_client.get(img_url)
+                        if r.status_code == 200:
+                            cache_path.write_bytes(r.content)
+                            yield event.chain_result([Comp.Image.fromFileSystem(str(cache_path))])
+                            return
+        except Exception as e:
+            logger.info(f"渲染缓存落盘失败: {e}")
+        # 仍然直接发 URL
         yield event.image_result(img_url)
 
     # @quote.command("random")  # disabled: use 顶层指令“语录”
@@ -567,7 +634,8 @@ class QuotesPlugin(Star):
         text_color = self.img_cfg.get("text_color", "#fff")
         font_family = self.img_cfg.get("font_family", "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'WenQuanYi Micro Hei', Arial, sans-serif")
 
-        avatar = self._avatar_url(q.qq)
+        # 本地头像 URI（若可用），否则回退 qlogo
+        avatar = await self.store.get_avatar_uri(q.qq, enable_cache=(self._cfg_avatar_enabled and self._cfg_avatar_cache))
         safe_text = self._strip_at_tokens(q.text)
         escaped_text = html.escape(safe_text)
         grad_width = max(200, int(width * 0.26))
