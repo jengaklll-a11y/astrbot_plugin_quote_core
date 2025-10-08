@@ -5,7 +5,6 @@ import json
 import random
 import re
 import html
-import base64
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -224,8 +223,7 @@ class QuotesPlugin(Star):
         self.perf_cfg = (self.config.get("performance") or {})
         self._cfg_text_mode = bool(self.perf_cfg.get("text_mode", False))
         self._cfg_render_cache = bool(self.perf_cfg.get("render_cache", True))
-        self._cfg_avatar_cache = bool(self.perf_cfg.get("avatar_cache", True))
-        self._cfg_avatar_enabled = bool((self.config.get("avatar") or {}).get("enabled", True))
+        # 强制显示头像，移除本地头像命中逻辑
         # 发送记录：避免在消息中暴露 qid，通过会话最近记录辅助删除
         self._pending_qid: Dict[str, str] = {}
         self._last_sent_qid: Dict[str, str] = {}
@@ -486,8 +484,7 @@ class QuotesPlugin(Star):
             "语录插件帮助\n"
             "- 上传：先回复某人的消息，再发送“上传”（可附带图片）保存为语录。可在消息中 @某人 指定图片语录归属；不@则默认归属上传者。\n"
             "- 语录：随机发送一条语录；可用“语录 @某人”仅随机该用户的语录；若含用户上传图片，将直接发送原图。\n"
-            "- 删除：回复机器人刚发送的随机语录消息，发送“删除”或“删除语录”进行删除。\n"
-            "- 设置：在插件设置中可配置“头像.enabled”关闭随机语录头像展示（可降低延迟）。"
+            "- 删除：回复机器人刚发送的随机语录消息，发送“删除”或“删除语录”进行删除。"
         )
         yield event.plain_result(help_text)
 
@@ -652,8 +649,8 @@ class QuotesPlugin(Star):
         text_color = self.img_cfg.get("text_color", "#fff")
         font_family = self.img_cfg.get("font_family", "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'WenQuanYi Micro Hei', Arial, sans-serif")
 
-        # 本地头像 URI（若可用），否则回退 qlogo
-        avatar = await self.store.get_avatar_uri(q.qq, enable_cache=(self._cfg_avatar_enabled and self._cfg_avatar_cache))
+        # 始终使用远程 qlogo 头像（避免本地 file:// 或 dataURI 兼容性问题）
+        avatar = self._avatar_url(q.qq)
         safe_text = self._strip_at_tokens(q.text)
         escaped_text = html.escape(safe_text)
         grad_width = max(200, int(width * 0.26))
