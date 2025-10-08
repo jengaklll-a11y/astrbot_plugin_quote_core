@@ -10,6 +10,17 @@
     "options": ["qlogo", "platform"],
     "default": "qlogo"
   },
+  "avatar": {
+    "description": "头像显示设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "随机语录渲染时是否显示头像（关闭可降低延迟）"
+      }
+    }
+  },
   "image": {
     "description": "语录图样式配置",
     "type": "object",
