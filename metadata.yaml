@@ -1,0 +1,5 @@
+name: quotes
+desc: 提交语录并生成带头像的语录图片（QQ Napcat 适配）。
+version: v0.1.1
+author: Codex
+repo: https://example.com/astrbot-plugin-quotes

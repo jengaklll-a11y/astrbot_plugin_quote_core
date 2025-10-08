@@ -1,0 +1,511 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import random
+import re
+from dataclasses import dataclass, asdict, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.star import Context, Star, register
+from astrbot.api import logger
+import astrbot.api.message_components as Comp
+
+try:
+    # 可用时类型提示
+    from astrbot.api import AstrBotConfig  # type: ignore
+except Exception:  # pragma: no cover
+    AstrBotConfig = dict  # type: ignore
+
+
+PLUGIN_NAME = "quotes"
+
+
+@dataclass
+class Quote:
+    id: str
+    qq: str
+    name: str
+    text: str
+    created_by: str
+    created_at: float
+    images: List[str] = field(default_factory=list)  # 相对 data 目录的路径，如 "quotes/images/xxx.jpg"
+
+
+class QuoteStore:
+    """简易 JSON 存储，保存于 data/quotes/quotes.json。
+    - 遵循 AstrBot 插件规范：数据写入 data 目录，而非插件自身目录
+    - 通过 asyncio.Lock 简单串行化写入，避免并发写入冲突
+    """
+
+    def __init__(self, root_data_dir: Path):
+        self.root = Path(root_data_dir)
+        self.dir = self.root / "quotes"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.images_dir = self.dir / "images"
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.file = self.dir / "quotes.json"
+        self._lock = asyncio.Lock()
+        if not self.file.exists():
+            self._write({"quotes": []})
+
+    def images_rel(self, filename: str) -> str:
+        """返回相对 data 目录的路径，统一存储格式。"""
+        return f"quotes/images/{filename}"
+
+    def images_abs(self, filename: str) -> Path:
+        return self.images_dir / filename
+
+    async def save_image_from_url(self, url: str) -> Optional[str]:
+        """下载网络图片并保存，返回相对 data 的路径。"""
+        try:
+            import httpx  # 轻量异步 HTTP 客户端
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                # 猜扩展名
+                ct = (resp.headers.get("Content-Type") or "").lower()
+                ext = ".jpg"
+                if "png" in ct:
+                    ext = ".png"
+                elif "webp" in ct:
+                    ext = ".webp"
+                elif "gif" in ct:
+                    ext = ".gif"
+                # 从 url 推断
+                from urllib.parse import urlparse
+                p = urlparse(url)
+                name_guess = Path(p.path).name
+                if "." in name_guess and len(Path(name_guess).suffix) <= 5:
+                    ext = Path(name_guess).suffix
+                from time import time
+                filename = f"{int(time()*1000)}_{random.randint(1000,9999)}{ext}"
+                abs_path = self.images_abs(filename)
+                abs_path.write_bytes(resp.content)
+                return self.images_rel(filename)
+        except Exception as e:
+            logger.warning(f"下载图片失败: {e}")
+            return None
+
+    async def save_image_from_fs(self, src: str) -> Optional[str]:
+        """从本地文件复制，返回相对 data 的路径。"""
+        try:
+            sp = Path(src)
+            if not sp.exists():
+                return None
+            ext = sp.suffix or ".jpg"
+            from time import time
+            filename = f"{int(time()*1000)}_{random.randint(1000,9999)}{ext}"
+            dp = self.images_abs(filename)
+            data = sp.read_bytes()
+            dp.write_bytes(data)
+            return self.images_rel(filename)
+        except Exception as e:
+            logger.warning(f"保存本地图片失败: {e}")
+            return None
+
+    def _read(self) -> Dict[str, Any]:
+        if not self.file.exists():
+            return {"quotes": []}
+        try:
+            return json.loads(self.file.read_text(encoding="utf-8"))
+        except Exception:
+            logger.error("quotes.json 解析失败，已回退为空列表。")
+            return {"quotes": []}
+
+    def _write(self, data: Dict[str, Any]):
+        self.file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    async def add(self, q: Quote):
+        async with self._lock:
+            data = self._read()
+            data.setdefault("quotes", []).append(asdict(q))
+            self._write(data)
+
+    async def random_one(self) -> Optional[Quote]:
+        data = self._read()
+        arr = data.get("quotes", [])
+        if not arr:
+            return None
+        obj = random.choice(arr)
+        return Quote(**obj)
+
+
+@register(
+    PLUGIN_NAME,
+    "Codex",
+    "提交语录并生成带头像的语录图片",
+    "0.1.1",
+    "https://example.com/astrbot-plugin-quotes",
+)
+class QuotesPlugin(Star):
+    def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
+        super().__init__(context)
+        self.config = config or {}
+        # 推断 data 根目录：优先配置项 storage；其次猜测从默认 data 目录
+        storage = str(self.config.get("storage", "") or "").strip()
+        # 优先使用 AstrBot 进程工作目录下的 data 目录
+        data_root = Path(storage) if storage else Path.cwd() / "data"
+        self.store = QuoteStore(data_root)
+        self.avatar_provider = (self.config.get("avatar_provider") or "qlogo").lower()
+        self.img_cfg = (self.config.get("image") or {})
+
+    async def initialize(self):
+        """可选：异步初始化。"""
+        pass
+
+    # ============= 指令 =============
+    @filter.command_group("quote")
+    def quote(self):
+        """语录功能命令组（/quote ...）"""
+        pass
+
+    @quote.command("add", alias={"append"})
+    async def add_quote(self, event: AstrMessageEvent):
+        """添加语录。新版用法：先『回复某人的消息』，再发送 /quote add（别名：/语录提交 或 /语录添加）
+        注意：会自动剔除被回复文本中的 @提及（包括昵称与QQ号），防止把 @内容渲染进语录图。"""
+        # 优先从消息链中提取 Reply 段，拿到被回复消息的 message_id
+        reply_msg_id: Optional[str] = None
+        try:
+            for seg in event.get_messages():  # type: ignore[attr-defined]
+                if isinstance(seg, Comp.Reply):
+                    reply_msg_id = (
+                        getattr(seg, "message_id", None)
+                        or getattr(seg, "id", None)
+                        or getattr(seg, "reply", None)
+                        or getattr(seg, "msgId", None)
+                    )
+                    if reply_msg_id:
+                        break
+        except Exception as e:
+            logger.warning(f"解析 Reply 段失败: {e}")
+
+        if not reply_msg_id:
+            yield event.plain_result("请先『回复某人的消息』，再发送 /quote add。")
+            return
+
+        # 通过 Napcat/OneBot get_msg 拉取被回复消息内容与发送者
+        target_text: Optional[str] = None
+        target_qq: Optional[str] = None
+        target_name: Optional[str] = None
+        ret: Dict[str, Any] = {}
+        if event.get_platform_name() == "aiocqhttp": 
+            try:
+                client = event.bot
+                ret = await client.api.call_action("get_msg", message_id=int(str(reply_msg_id)))
+                # 提取纯文本
+                target_text = self._extract_plaintext_from_onebot_message(ret.get("message"))
+                # 发送者
+                sender = ret.get("sender") or {}
+                target_qq = str(sender.get("user_id") or sender.get("qq") or "") or None
+                card = (sender.get("card") or "").strip()
+                nickname = (sender.get("nickname") or "").strip()
+                target_name = card or nickname or target_qq
+            except Exception as e:
+                logger.info(f"get_msg 失败，回退：{e}")
+
+        # 回退处理
+        if not target_text:
+            # 允许在回复的同时附带额外文本时，取去掉指令后的剩余文本
+            text = (event.message_str or "").strip()
+            for kw in ("/quote add", "quote add", "语录提交", "语录添加"):
+                if text.startswith(kw):
+                    text = text[len(kw):].strip()
+            target_text = text or None
+
+        # 收集图片（被回复消息 + 当前消息链）
+        images: List[str] = []
+        if event.get_platform_name() == "aiocqhttp" and ret:
+            images += await self._ingest_images_from_onebot_message(event, ret.get("message"))
+        images += await self._ingest_images_from_segments(event)
+        images = list(dict.fromkeys(images))
+
+        # 统一剔除 @提及（例如：@昵称(123456789)、@昵称、@全体成员）
+        target_text = self._strip_at_tokens(target_text or "") or ""
+
+        # 文本缺失时允许“纯图片语录”
+        if not target_text and not images:
+            yield event.plain_result("未获取到被回复消息内容或图片，请确认已正确回复对方的消息或附带图片。")
+            return
+        if not target_text and images:
+            target_text = "[图片]"
+
+        # 名称/QQ 兜底
+        if not target_qq:
+            # 从 @ 中兜底（如平台未提供 get_msg 时）
+            target_qq = self._extract_at_qq(event) or ""
+        if not target_name:
+            target_name = await self._resolve_user_name(event, target_qq) if target_qq else ""
+        if not target_name:
+            target_name = target_qq or "未知用户"
+
+        from time import time
+
+        q = Quote(
+            id=str(int(time()*1000)) + f"_{random.randint(1000,9999)}",
+            qq=str(target_qq or ""),
+            name=str(target_name),
+            text=str(target_text),
+            created_by=str(event.get_sender_id()),
+            created_at=time(),
+            images=images,
+        )
+        await self.store.add(q)
+        if images:
+            yield event.plain_result(f"已收录 {q.name} 的语录，并保存 {len(images)} 张图片。")
+        else:
+            yield event.plain_result(f"已收录 {q.name} 的语录：{target_text}")
+
+    @filter.command("语录", alias={"名言"})
+    async def random_quote(self, event: AstrMessageEvent):
+        """随机发送一条语录：
+        - 若该语录含用户上传图片，直接发送原图（不经渲染）。
+        - 若不含图片，则按原逻辑渲染语录图片。
+        也可用：/quote random
+        """
+        q = await self.store.random_one()
+        if not q:
+            yield event.plain_result("还没有语录，先用 /quote add 添加一条吧~")
+            return
+        # 优先发送原图
+        if getattr(q, "images", None):
+            try:
+                rel = random.choice(q.images)
+                # 兼容相对/绝对路径
+                p = Path(rel)
+                abs_path = p if p.is_absolute() else (self.store.root / rel)
+                if abs_path.exists():
+                    yield event.chain_result([Comp.Image.fromFileSystem(str(abs_path))])
+                    return
+            except Exception as e:
+                logger.info(f"随机原图发送失败，回退渲染：{e}")
+        # 回退：渲染语录图
+        img_url = await self._render_quote_image(q)
+        yield event.image_result(img_url)
+
+    @quote.command("random")
+    async def random_quote_cmd(self, event: AstrMessageEvent):
+        async for res in self.random_quote(event):
+            yield res
+
+    # ============= 内部方法 =============
+    def _extract_at_qq(self, event: AstrMessageEvent) -> Optional[str]:
+        try:
+            for seg in event.get_messages():  # type: ignore[attr-defined]
+                if isinstance(seg, Comp.At):
+                    qq = getattr(seg, "qq", None) or getattr(seg, "target", None)
+                    if qq:
+                        return str(qq)
+        except Exception as e:
+            logger.warning(f"解析 @ 失败: {e}")
+        return None
+
+    async def _resolve_user_name(self, event: AstrMessageEvent, qq: str) -> str:
+        # 优先尝试平台 API（Napcat），否则退回 qq 号
+        if event.get_platform_name() == "aiocqhttp":
+            try:
+                group_id = event.get_group_id()
+                client = event.bot  # aiocqhttp client
+                if group_id:
+                    payloads = {"group_id": int(group_id), "user_id": int(qq), "no_cache": True}
+                    ret = await client.api.call_action("get_group_member_info", **payloads)
+                    # 优先群名片，其次昵称
+                    card = (ret.get("card") or "").strip()
+                    nickname = (ret.get("nickname") or "").strip()
+                    if card or nickname:
+                        return card or nickname
+                else:
+                    payloads = {"user_id": int(qq), "no_cache": True}
+                    ret = await client.api.call_action("get_stranger_info", **payloads)
+                    nickname = (ret.get("nickname") or "").strip()
+                    if nickname:
+                        return nickname
+            except Exception as e:
+                logger.info(f"读取 Napcat 用户信息失败，回退：{e}")
+        return str(qq)
+
+    def _avatar_url(self, qq: str) -> str:
+        # qlogo 头像
+        size = 640
+        return f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s={size}"
+
+    def _extract_plaintext_from_onebot_message(self, message) -> Optional[str]:
+        try:
+            if isinstance(message, list):
+                parts: List[str] = []
+                for m in message:
+                    t = m.get("type")
+                    d = m.get("data") or {}
+                    if t in ("text", "plain"):
+                        parts.append(str(d.get("text") or ""))
+                text = "".join(parts).strip()
+                return text if text else None
+        except Exception:
+            pass
+        return None
+
+    async def _ingest_images_from_onebot_message(self, event: AstrMessageEvent, message) -> List[str]:
+        saved: List[str] = []
+        try:
+            if not isinstance(message, list):
+                return saved
+            for m in message:
+                try:
+                    if (m.get("type") or "").lower() != "image":
+                        continue
+                    d = m.get("data") or {}
+                    url = d.get("url") or d.get("image_url")
+                    if url and (str(url).startswith("http://") or str(url).startswith("https://")):
+                        rel = await self.store.save_image_from_url(str(url))
+                        if rel:
+                            saved.append(rel)
+                            continue
+                    file_id_or_path = d.get("file") or d.get("path")
+                    if file_id_or_path:
+                        # Napcat get_image: 入参 file=xxx，返回 { 'file': 'C:\\...'}
+                        try:
+                            client = event.bot
+                            ret = await client.api.call_action("get_image", file=str(file_id_or_path))
+                            local_path = ret.get("file") or ret.get("path") or ret.get("file_path")
+                            if local_path:
+                                rel = await self.store.save_image_from_fs(str(local_path))
+                                if rel:
+                                    saved.append(rel)
+                                    continue
+                        except Exception as e:
+                            logger.info(f"get_image 回退失败: {e}")
+                        # 直接尝试当作本地路径
+                        rel = await self.store.save_image_from_fs(str(file_id_or_path))
+                        if rel:
+                            saved.append(rel)
+                except Exception as e:
+                    logger.warning(f"处理图片段失败: {e}")
+        except Exception as e:
+            logger.warning(f"解析 OneBot 消息图片失败: {e}")
+        return list(dict.fromkeys(saved))  # 去重，保持顺序
+
+    async def _ingest_images_from_segments(self, event: AstrMessageEvent) -> List[str]:
+        saved: List[str] = []
+        try:
+            for seg in event.get_messages():  # type: ignore[attr-defined]
+                if isinstance(seg, Comp.Image):
+                    url = getattr(seg, "url", None)
+                    file_or_path = getattr(seg, "file", None) or getattr(seg, "path", None)
+                    if url and (str(url).startswith("http://") or str(url).startswith("https://")):
+                        rel = await self.store.save_image_from_url(str(url))
+                        if rel:
+                            saved.append(rel)
+                    elif file_or_path:
+                        # 尝试当作本地路径复制；若失败再走 Napcat get_image
+                        rel = await self.store.save_image_from_fs(str(file_or_path))
+                        if rel:
+                            saved.append(rel)
+                        elif event.get_platform_name() == "aiocqhttp":
+                            try:
+                                client = event.bot
+                                ret = await client.api.call_action("get_image", file=str(file_or_path))
+                                local_path = ret.get("file") or ret.get("path") or ret.get("file_path")
+                                if local_path:
+                                    rel = await self.store.save_image_from_fs(str(local_path))
+                                    if rel:
+                                        saved.append(rel)
+                            except Exception as e:
+                                logger.info(f"segments get_image 回退失败: {e}")
+        except Exception as e:
+            logger.warning(f"解析 Comp.Image 失败: {e}")
+        return list(dict.fromkeys(saved))
+
+    async def _render_quote_image(self, q: Quote) -> str:
+        width = int(self.img_cfg.get("width", 1280))
+        height = int(self.img_cfg.get("height", 427))
+        bg_color = self.img_cfg.get("bg_color", "#000")
+        text_color = self.img_cfg.get("text_color", "#fff")
+        font_family = self.img_cfg.get("font_family", "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'WenQuanYi Micro Hei', Arial, sans-serif")
+
+        avatar = self._avatar_url(q.qq)
+        safe_text = self._strip_at_tokens(q.text)
+        grad_width = max(200, int(width * 0.26))
+        grad_left = int(width * 0.36) - int(grad_width * 0.7)
+
+        TMPL = f"""
+        <html>
+        <head>
+            <meta charset='utf-8' />
+            <style>
+                * {{ box-sizing: border-box; }}
+                html, body {{ margin:0; padding:0; width:{width}px; height:{height}px; background:{bg_color}; }}
+                .root {{ position:relative; width:{width}px; height:{height}px; background:{bg_color}; font-family:{font_family}; overflow:hidden; }}
+                .left {{ position:absolute; left:0; top:0; width:{int(width*0.36)}px; height:{height}px; overflow:hidden; z-index:0; }}
+                .left img {{ width:100%; height:100%; object-fit:cover; display:block; }}
+                .left .left-shade {{ position:absolute; inset:0; background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.28) 58%, rgba(0,0,0,0.55) 100%); }}
+                .right {{ position:absolute; left:{int(width*0.36)}px; top:0; width:{int(width*0.64)}px; height:{height}px; background:{bg_color}; display:flex; align-items:center; justify-content:center; text-align:center; z-index:2; }}
+                .text {{ color:{text_color}; font-size:38px; line-height:1.6; padding:0 80px; max-width:calc(100% - 160px); display:flex; align-items:center; justify-content:center; text-align:center; }}
+                .signature {{ position:absolute; right:44px; bottom:28px; color:rgba(255,255,255,0.82); font-size:22px; font-weight:300; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: geometricPrecision; letter-spacing:0.2px; z-index:3; }}
+                .quote-mark {{ color:{text_color}; opacity:0.8; margin-right:14px; }}
+                /* 大范围渐变覆盖，避免中间出现分界线 */
+                .fade-overlay {{
+                    position:absolute;
+                    top:0; bottom:0;
+                    left:{grad_left}px;
+                    width:{grad_width}px;
+                    pointer-events:none;
+                    z-index:1;
+                    background: linear-gradient(
+                        to right,
+                        rgba(0,0,0,0.00) 0%,
+                        rgba(0,0,0,0.35) 38%,
+                        rgba(0,0,0,0.70) 70%,
+                        {bg_color} 100%
+                    );
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="root">
+                <div class="left"><img src="{avatar}" /><div class="left-shade"></div></div>
+                <div class="right">
+                    <div class="text">
+                        <span class="quote-mark">「</span>
+                        <div>{safe_text}</div>
+                        <span class="quote-mark">」</span>
+                    </div>
+                </div>
+                <div class="fade-overlay"></div>
+                <div class="signature">— {q.name}</div>
+            </div>
+        </body>
+        </html>
+        """
+        # 渲染时强制裁剪并禁止全页，避免底部空白
+        options = {
+            "full_page": False,
+            "omit_background": False,
+            "clip": {"x": 0, "y": 0, "width": width, "height": height},
+        }
+        url = await self.html_render(TMPL, {}, options=options)
+        return url
+
+    async def terminate(self):
+        """插件卸载/停用时回调。"""
+        pass
+
+    # ============= 语录提交中文别名 =============
+    @filter.command("语录提交", alias={"语录添加", "提交语录"})
+    async def add_quote_alias(self, event: AstrMessageEvent):
+        async for res in self.add_quote(event):
+            yield res
+
+    def _strip_at_tokens(self, text: str) -> str:
+        """去除 At 提及文本，例如：@昵称(123456789)、@昵称、@全体成员。
+        仅影响渲染与入库文本，不改变其他消息段。"""
+        if not text:
+            return ""
+        # 移除 @昵称(数字) 或 @昵称 以及 @全体成员（含中文括号）
+        text = re.sub(r"@[^@\s（）()]+(?:[（(]\d{5,}[）)])?", "", text)
+        text = text.replace("@全体成员", "")
+        # 压缩多余空白
+        return " ".join(text.split())
+
+

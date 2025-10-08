@@ -1,0 +1,24 @@
+{
+  "storage": {
+    "description": "数据存储根目录（留空则自动使用 AstrBot 的 data 目录）",
+    "type": "string",
+    "default": ""
+  },
+  "avatar_provider": {
+    "description": "头像提供源：qlogo 或 platform（platform 需 Napcat 权限）",
+    "type": "string",
+    "options": ["qlogo", "platform"],
+    "default": "qlogo"
+  },
+  "image": {
+    "description": "语录图样式配置",
+    "type": "object",
+    "items": {
+      "width": { "type": "int", "default": 1280, "description": "图片宽度(px)" },
+      "height": { "type": "int", "default": 427, "description": "图片高度(px)" },
+      "bg_color": { "type": "string", "default": "#000", "description": "右侧背景色" },
+      "text_color": { "type": "string", "default": "#fff", "description": "文字颜色" },
+      "font_family": { "type": "string", "default": "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'WenQuanYi Micro Hei', Arial, sans-serif" }
+    }
+  }
+}
