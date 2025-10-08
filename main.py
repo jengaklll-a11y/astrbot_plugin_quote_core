@@ -176,7 +176,7 @@ class QuotesPlugin(Star):
         """语录功能命令组（/quote ...）"""
         pass
 
-    @quote.command("add", alias={"append"})
+    # @quote.command("add", alias={"append"})  # disabled: use 顶层指令“上传”
     async def add_quote(self, event: AstrMessageEvent):
         """添加语录。新版用法：先『回复某人的消息』，再发送 /quote add（别名：/语录提交 或 /语录添加）
         注意：会自动剔除被回复文本中的 @提及（包括昵称与QQ号），防止把 @内容渲染进语录图。"""
@@ -224,7 +224,7 @@ class QuotesPlugin(Star):
         if not target_text:
             # 允许在回复的同时附带额外文本时，取去掉指令后的剩余文本
             text = (event.message_str or "").strip()
-            for kw in ("/quote add", "quote add", "语录提交", "语录添加"):
+            for kw in ("上传",):
                 if text.startswith(kw):
                     text = text[len(kw):].strip()
             target_text = text or None
@@ -272,7 +272,7 @@ class QuotesPlugin(Star):
         else:
             yield event.plain_result(f"已收录 {q.name} 的语录：{target_text}")
 
-    @filter.command("语录", alias={"名言"})
+    @filter.command("语录")
     async def random_quote(self, event: AstrMessageEvent):
         """随机发送一条语录：
         - 若该语录含用户上传图片，直接发送原图（不经渲染）。
@@ -303,7 +303,7 @@ class QuotesPlugin(Star):
         img_url = await self._render_quote_image(q)
         yield event.image_result(img_url)
 
-    @quote.command("random")
+    # @quote.command("random")  # disabled: use 顶层指令“语录”
     async def random_quote_cmd(self, event: AstrMessageEvent):
         async for res in self.random_quote(event):
             yield res
@@ -588,7 +588,7 @@ class QuotesPlugin(Star):
         pass
 
     # ============= 语录提交中文别名 =============
-    @filter.command("语录提交", alias={"语录添加", "提交语录"})
+    @filter.command("上传")
     async def add_quote_alias(self, event: AstrMessageEvent):
         async for res in self.add_quote(event):
             yield res
