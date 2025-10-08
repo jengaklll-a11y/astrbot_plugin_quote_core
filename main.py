@@ -51,15 +51,19 @@ class QuoteStore:
         if not self.file.exists():
             self._write({"quotes": []})
 
-    def images_rel(self, filename: str) -> str:
-        """返回相对 data 目录的路径，统一存储格式。"""
+    def images_rel(self, filename: str, group_key: Optional[str] = None) -> str:
+        """返回相对 data 目录的路径，按群分目录：quotes/images/<group_key>/<filename>。"""
+        if group_key:
+            return f"quotes/images/{group_key}/{filename}"
         return f"quotes/images/{filename}"
 
-    def images_abs(self, filename: str) -> Path:
-        return self.images_dir / filename
+    def images_abs(self, filename: str, group_key: Optional[str] = None) -> Path:
+        base = self.images_dir / group_key if group_key else self.images_dir
+        base.mkdir(parents=True, exist_ok=True)
+        return base / filename
 
-    async def save_image_from_url(self, url: str) -> Optional[str]:
-        """下载网络图片并保存，返回相对 data 的路径。"""
+    async def save_image_from_url(self, url: str, group_key: Optional[str] = None) -> Optional[str]:
+        """下载网络图片并保存，返回相对 data 的路径。按群分目录。"""
         try:
             import httpx  # 轻量异步 HTTP 客户端
             async with httpx.AsyncClient(timeout=20) as client:
@@ -82,15 +86,15 @@ class QuoteStore:
                     ext = Path(name_guess).suffix
                 from time import time
                 filename = f"{int(time()*1000)}_{random.randint(1000,9999)}{ext}"
-                abs_path = self.images_abs(filename)
+                abs_path = self.images_abs(filename, group_key)
                 abs_path.write_bytes(resp.content)
-                return self.images_rel(filename)
+                return self.images_rel(filename, group_key)
         except Exception as e:
             logger.warning(f"下载图片失败: {e}")
             return None
 
-    async def save_image_from_fs(self, src: str) -> Optional[str]:
-        """从本地文件复制，返回相对 data 的路径。"""
+    async def save_image_from_fs(self, src: str, group_key: Optional[str] = None) -> Optional[str]:
+        """从本地文件复制，返回相对 data 的路径（按群分目录）。"""
         try:
             sp = Path(src)
             if not sp.exists():
@@ -98,10 +102,10 @@ class QuoteStore:
             ext = sp.suffix or ".jpg"
             from time import time
             filename = f"{int(time()*1000)}_{random.randint(1000,9999)}{ext}"
-            dp = self.images_abs(filename)
+            dp = self.images_abs(filename, group_key)
             data = sp.read_bytes()
             dp.write_bytes(data)
-            return self.images_rel(filename)
+            return self.images_rel(filename, group_key)
         except Exception as e:
             logger.warning(f"保存本地图片失败: {e}")
             return None
@@ -237,11 +241,12 @@ class QuotesPlugin(Star):
                     text = text[len(kw):].strip()
             target_text = text or None
 
-        # 收集图片（被回复消息 + 当前消息链）
+        # 收集图片（被回复消息 + 当前消息链），按群分目录
+        group_key = str(event.get_group_id() or f"private_{event.get_sender_id()}")
         images: List[str] = []
         if event.get_platform_name() == "aiocqhttp" and ret:
-            images += await self._ingest_images_from_onebot_message(event, ret.get("message"))
-        images += await self._ingest_images_from_segments(event)
+            images += await self._ingest_images_from_onebot_message(event, ret.get("message"), group_key)
+        images += await self._ingest_images_from_segments(event, group_key)
         images = list(dict.fromkeys(images))
 
         # 统一剔除 @提及（例如：@昵称(123456789)、@昵称、@全体成员）
@@ -466,7 +471,7 @@ class QuotesPlugin(Star):
             pass
         return None
 
-    async def _ingest_images_from_onebot_message(self, event: AstrMessageEvent, message) -> List[str]:
+    async def _ingest_images_from_onebot_message(self, event: AstrMessageEvent, message, group_key: str) -> List[str]:
         saved: List[str] = []
         try:
             if not isinstance(message, list):
@@ -478,7 +483,7 @@ class QuotesPlugin(Star):
                     d = m.get("data") or {}
                     url = d.get("url") or d.get("image_url")
                     if url and (str(url).startswith("http://") or str(url).startswith("https://")):
-                        rel = await self.store.save_image_from_url(str(url))
+                        rel = await self.store.save_image_from_url(str(url), group_key)
                         if rel:
                             saved.append(rel)
                             continue
@@ -490,14 +495,14 @@ class QuotesPlugin(Star):
                             ret = await client.api.call_action("get_image", file=str(file_id_or_path))
                             local_path = ret.get("file") or ret.get("path") or ret.get("file_path")
                             if local_path:
-                                rel = await self.store.save_image_from_fs(str(local_path))
+                                rel = await self.store.save_image_from_fs(str(local_path), group_key)
                                 if rel:
                                     saved.append(rel)
                                     continue
                         except Exception as e:
                             logger.info(f"get_image 回退失败: {e}")
                         # 直接尝试当作本地路径
-                        rel = await self.store.save_image_from_fs(str(file_id_or_path))
+                        rel = await self.store.save_image_from_fs(str(file_id_or_path), group_key)
                         if rel:
                             saved.append(rel)
                 except Exception as e:
@@ -506,7 +511,7 @@ class QuotesPlugin(Star):
             logger.warning(f"解析 OneBot 消息图片失败: {e}")
         return list(dict.fromkeys(saved))  # 去重，保持顺序
 
-    async def _ingest_images_from_segments(self, event: AstrMessageEvent) -> List[str]:
+    async def _ingest_images_from_segments(self, event: AstrMessageEvent, group_key: str) -> List[str]:
         saved: List[str] = []
         try:
             for seg in event.get_messages():  # type: ignore[attr-defined]
@@ -514,12 +519,12 @@ class QuotesPlugin(Star):
                     url = getattr(seg, "url", None)
                     file_or_path = getattr(seg, "file", None) or getattr(seg, "path", None)
                     if url and (str(url).startswith("http://") or str(url).startswith("https://")):
-                        rel = await self.store.save_image_from_url(str(url))
+                        rel = await self.store.save_image_from_url(str(url), group_key)
                         if rel:
                             saved.append(rel)
                     elif file_or_path:
                         # 尝试当作本地路径复制；若失败再走 Napcat get_image
-                        rel = await self.store.save_image_from_fs(str(file_or_path))
+                        rel = await self.store.save_image_from_fs(str(file_or_path), group_key)
                         if rel:
                             saved.append(rel)
                         elif event.get_platform_name() == "aiocqhttp":
@@ -528,7 +533,7 @@ class QuotesPlugin(Star):
                                 ret = await client.api.call_action("get_image", file=str(file_or_path))
                                 local_path = ret.get("file") or ret.get("path") or ret.get("file_path")
                                 if local_path:
-                                    rel = await self.store.save_image_from_fs(str(local_path))
+                                    rel = await self.store.save_image_from_fs(str(local_path), group_key)
                                     if rel:
                                         saved.append(rel)
                             except Exception as e:
