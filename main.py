@@ -132,6 +132,17 @@ class QuoteStore:
         obj = random.choice(arr)
         return Quote(**obj)
 
+    async def delete_by_id(self, qid: str) -> bool:
+        async with self._lock:
+            data = self._read()
+            arr = data.get("quotes", [])
+            new_arr = [x for x in arr if str(x.get("id")) != str(qid)]
+            if len(new_arr) == len(arr):
+                return False
+            data["quotes"] = new_arr
+            self._write(data)
+            return True
+
 
 @register(
     PLUGIN_NAME,
@@ -261,8 +272,8 @@ class QuotesPlugin(Star):
     @filter.command("语录", alias={"名言"})
     async def random_quote(self, event: AstrMessageEvent):
         """随机发送一条语录：
-        - 若该语录含用户上传图片，直接发送原图（不经渲染）。
-        - 若不含图片，则按原逻辑渲染语录图片。
+        - 若该语录含用户上传图片，直接发送原图（不经渲染），并附带内部标记以支持删除。
+        - 若不含图片，则按原逻辑渲染语录图片，并附带内部标记以支持删除。
         也可用：/quote random
         """
         q = await self.store.random_one()
@@ -277,18 +288,86 @@ class QuotesPlugin(Star):
                 p = Path(rel)
                 abs_path = p if p.is_absolute() else (self.store.root / rel)
                 if abs_path.exists():
-                    yield event.chain_result([Comp.Image.fromFileSystem(str(abs_path))])
+                    yield event.chain_result([
+                        Comp.Image.fromFileSystem(str(abs_path)),
+                        Comp.Plain(self._qid_tag(q.id)),
+                    ])
                     return
             except Exception as e:
                 logger.info(f"随机原图发送失败，回退渲染：{e}")
         # 回退：渲染语录图
         img_url = await self._render_quote_image(q)
-        yield event.image_result(img_url)
+        yield event.chain_result([
+            Comp.Image.fromURL(img_url),
+            Comp.Plain(self._qid_tag(q.id)),
+        ])
 
     @quote.command("random")
     async def random_quote_cmd(self, event: AstrMessageEvent):
         async for res in self.random_quote(event):
             yield res
+
+    def _qid_tag(self, qid: str) -> str:
+        return f"[qid:{qid}]"
+
+    def _extract_qid_from_onebot_message(self, message) -> Optional[str]:
+        try:
+            if isinstance(message, list):
+                buf: List[str] = []
+                for m in message:
+                    t = (m.get("type") or "").lower()
+                    if t in ("text", "plain"):
+                        d = m.get("data") or {}
+                        buf.append(str(d.get("text") or ""))
+                text = "".join(buf)
+                m = re.search(r"\[qid:([^\]]+)\]", text)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return None
+
+    @filter.command("删除", alias={"删除语录"})
+    async def delete_quote(self, event: AstrMessageEvent):
+        """删除语录：请『回复机器人发送的语录』并发送“删除”来删除该语录。"""
+        # 提取被回复消息 id
+        reply_msg_id: Optional[str] = None
+        try:
+            for seg in event.get_messages():  # type: ignore[attr-defined]
+                if isinstance(seg, Comp.Reply):
+                    reply_msg_id = (
+                        getattr(seg, "message_id", None)
+                        or getattr(seg, "id", None)
+                        or getattr(seg, "reply", None)
+                        or getattr(seg, "msgId", None)
+                    )
+                    if reply_msg_id:
+                        break
+        except Exception as e:
+            logger.warning(f"解析 Reply 段失败: {e}")
+
+        if not reply_msg_id:
+            yield event.plain_result("请先『回复机器人发送的语录』，再发送 删除。")
+            return
+
+        # 拉取被回复消息内容，解析 [qid:...] 标记
+        qid: Optional[str] = None
+        if event.get_platform_name() == "aiocqhttp":
+            try:
+                client = event.bot
+                ret = await client.api.call_action("get_msg", message_id=int(str(reply_msg_id)))
+                qid = self._extract_qid_from_onebot_message(ret.get("message"))
+            except Exception as e:
+                logger.info(f"读取被回复消息失败：{e}")
+        if not qid:
+            yield event.plain_result("未从被引用消息中找到语录标记（可能是旧消息）。请重新随机语录后再执行 删除。")
+            return
+
+        ok = await self.store.delete_by_id(qid)
+        if ok:
+            yield event.plain_result(f"已删除语录（ID={qid}）。")
+        else:
+            yield event.plain_result("未找到该语录，可能已被删除。")
 
     # ============= 内部方法 =============
     def _extract_at_qq(self, event: AstrMessageEvent) -> Optional[str]:
