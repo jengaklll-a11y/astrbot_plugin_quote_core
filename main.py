@@ -308,8 +308,8 @@ class QuotesPlugin(Star):
         else:
             target_qq = str(target_qq or "")
 
-        if not target_name:
-            target_name = await self._resolve_user_name(event, target_qq) if target_qq else ""
+        # 最终以归属 QQ 为准统一解析展示名，避免“名不对号”
+        target_name = await self._resolve_user_name(event, target_qq) if target_qq else ""
         if not target_name:
             target_name = target_qq or "未知用户"
 
@@ -517,14 +517,29 @@ class QuotesPlugin(Star):
 
     # ============= 内部方法 =============
     def _extract_at_qq(self, event: AstrMessageEvent) -> Optional[str]:
+        """尽可能稳健地提取 @ 对象的 QQ：
+        - 优先从消息链的 Comp.At 段读取（兼容 qq/target/uin/user_id/id 字段）。
+        - 兜底：从纯文本中匹配 "At:123456" 或 "@123456"。
+        """
         try:
             for seg in event.get_messages():  # type: ignore[attr-defined]
                 if isinstance(seg, Comp.At):
-                    qq = getattr(seg, "qq", None) or getattr(seg, "target", None)
-                    if qq:
-                        return str(qq)
+                    for k in ("qq", "target", "uin", "user_id", "id"):
+                        v = getattr(seg, k, None)
+                        if v:
+                            return str(v)
         except Exception as e:
             logger.warning(f"解析 @ 失败: {e}")
+        # 文本兜底匹配（适配某些平台/日志形态）
+        try:
+            text = (event.message_str or "").strip()
+            m = re.search(r"At[:：]\s*(\d{5,})", text)
+            if not m:
+                m = re.search(r"@\s*(\d{5,})", text)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
         return None
 
     async def _resolve_user_name(self, event: AstrMessageEvent, qq: str) -> str:
