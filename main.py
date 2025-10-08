@@ -386,6 +386,17 @@ class QuotesPlugin(Star):
         except Exception as e:
             logger.info(f"after_message_sent 记录失败: {e}")
 
+    @filter.command("语录帮助")
+    async def help_quote(self, event: AstrMessageEvent):
+        """显示语录相关指令的使用说明。"""
+        help_text = (
+            "语录插件帮助\n"
+            "- 上传：先回复某人的消息，再发送“上传”（可附带图片）保存为语录。\n"
+            "- 语录：随机发送一条语录；若含用户上传图片，将直接发送原图。\n"
+            "- 删除：回复机器人刚发送的随机语录消息，发送“删除”或“删除语录”进行删除。"
+        )
+        yield event.plain_result(help_text)
+
     # ============= 内部方法 =============
     def _extract_at_qq(self, event: AstrMessageEvent) -> Optional[str]:
         try:
