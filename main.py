@@ -132,6 +132,14 @@ class QuoteStore:
         obj = random.choice(arr)
         return Quote(**obj)
 
+    async def random_one_by_qq(self, qq: str) -> Optional[Quote]:
+        data = self._read()
+        arr = [x for x in data.get("quotes", []) if str(x.get("qq") or "") == str(qq)]
+        if not arr:
+            return None
+        obj = random.choice(arr)
+        return Quote(**obj)
+
     async def delete_by_id(self, qid: str) -> bool:
         async with self._lock:
             data = self._read()
@@ -279,9 +287,14 @@ class QuotesPlugin(Star):
         - 若不含图片，则按原逻辑渲染语录图片。
         也可用：/quote random
         """
-        q = await self.store.random_one()
+        # 若带 @某人，则仅随机该用户的语录
+        only_qq = self._extract_at_qq(event)
+        q = await (self.store.random_one_by_qq(only_qq) if only_qq else self.store.random_one())
         if not q:
-            yield event.plain_result("还没有语录，先用 /quote add 添加一条吧~")
+            if only_qq:
+                yield event.plain_result("这个用户还没有语录哦~")
+            else:
+                yield event.plain_result("还没有语录，先用 上传 保存一条吧~")
             return
         # 在不暴露 qid 的前提下，记录待发送的 qid（会在 after_message_sent 钩子中落到 _last_sent_qid）
         self._pending_qid[self._session_key(event)] = q.id
