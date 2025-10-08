@@ -297,10 +297,13 @@ class QuotesPlugin(Star):
         #     · 优先使用被回复消息的发送者（target_qq）。
         #     · 若无，则回退到本条消息的@对象。
         mention_qq = self._extract_at_qq(event)
-        if images_from_current:
-            target_qq = str(mention_qq or event.get_sender_id())
+        # 归属优先级：@指定 > 自己上传 > 被回复消息发送者
+        if mention_qq:
+            target_qq = str(mention_qq)
+        elif images_from_current:
+            target_qq = str(event.get_sender_id())
         else:
-            target_qq = str(target_qq or (mention_qq or ""))
+            target_qq = str(target_qq or "")
 
         if not target_name:
             target_name = await self._resolve_user_name(event, target_qq) if target_qq else ""
