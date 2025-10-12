@@ -5,6 +5,7 @@ import json
 import random
 import re
 import html
+import base64
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -242,24 +243,22 @@ class QuotesPlugin(Star):
     # ============= 指令 =============
     @filter.command_group("quote")
     def quote(self):
-        """语录功能命令组（/quote ...）"""
+        """语录功能命令组（quote ...）"""
         pass
 
     # @quote.command("add", alias={"append"})  # disabled: use 顶层指令“上传”
-    async def add_quote(self, event: AstrMessageEvent):
-        """添加语录（上传）。新版用法：先『回复某人的消息』，再发送“上传”。
-        会自动剔除被回复文本中的 @ 提及，避免渲染进语录图。"""
-        # 1) 解析被回复消息 ID
+    async def add_quote(self, event: AstrMessageEvent, uid: str = ""):
+        """添加语录（上传）。新版用法：
+        - 方式一：先『回复某人的消息』，再发送“上传”（可附图）。
+        - 方式二：不回复，直接“上传 <QQ号>”并附图，归属该 QQ。"""
+        # 1) 解析被回复消息 ID（可选）
         reply_msg_id = self._get_reply_message_id(event)
-        if not reply_msg_id:
-            yield event.plain_result("请先『回复某人的消息』，再发送 上传。")
-            return
 
         # 2) 拉取被回复消息内容与发送者
         target_text: Optional[str] = None
         target_qq: Optional[str] = None
         target_name: Optional[str] = None
-        ret: Dict[str, Any] = await self._fetch_onebot_msg(event, reply_msg_id)
+        ret: Dict[str, Any] = await self._fetch_onebot_msg(event, reply_msg_id) if reply_msg_id else {}
         if ret:
             target_text = self._extract_plaintext_from_onebot_message(ret.get("message"))
             sender = ret.get("sender") or {}
@@ -302,9 +301,13 @@ class QuotesPlugin(Star):
         # - 否则（未上传图片，仅回复他人）：
         #     · 优先使用被回复消息的发送者（target_qq）。
         #     · 若无，则回退到本条消息的@对象。
+        # 从命令参数 uid 覆盖（仅数字、长度>=5 即视为 QQ）
+        param_qq = uid.strip() if uid and uid.strip().isdigit() and len(uid.strip()) >= 5 else ""
         mention_qq = self._extract_at_qq(event)
-        # 归属优先级：@指定 > 自己上传 > 被回复消息发送者
-        if mention_qq:
+        # 归属优先级：参数QQ > @指定 > 自己上传 > 被回复消息发送者
+        if param_qq:
+            target_qq = str(param_qq)
+        elif mention_qq:
             target_qq = str(mention_qq)
         elif images_from_current:
             target_qq = str(event.get_sender_id())
@@ -335,17 +338,19 @@ class QuotesPlugin(Star):
             yield event.plain_result(f"已收录 {q.name} 的语录：{target_text}")
 
     @filter.command("语录")
-    async def random_quote(self, event: AstrMessageEvent):
+    async def random_quote(self, event: AstrMessageEvent, uid: str = ""):
         """随机发送一条语录：
         - 若该语录含用户上传图片，直接发送原图（不经渲染）。
         - 若不含图片，则按原逻辑渲染语录图片。
-        也可用：/quote random
+        
+        支持过滤：指令前缀+语录 <QQ号> 或 指令前缀+语录 @某人。
         """
         # 当前会话的群聊隔离键（全局模式下忽略）
         group_key = str(event.get_group_id() or f"private_{event.get_sender_id()}")
         effective_group = None if self._cfg_global_mode else group_key
-        # 若带 @某人，则仅随机该用户（全局模式下跨群；否则仅本群）
-        only_qq = self._extract_at_qq(event)
+        # 解析参数 QQ（不做正则，只校验纯数字长度>=5），否则用 @
+        explicit = uid.strip() if (uid and uid.strip().isdigit() and len(uid.strip()) >= 5) else None
+        only_qq = explicit or self._extract_at_qq(event)
         q = await (self.store.random_one_by_qq(only_qq, effective_group) if only_qq else self.store.random_one(effective_group))
         if not q:
             if only_qq:
@@ -408,6 +413,9 @@ class QuotesPlugin(Star):
         async for res in self.random_quote(event):
             yield res
 
+    # 适配无斜杠用法：支持“语录 12345678”或“语录 @某人”
+    @filter.event_message_type(filter.EventMessageType.ALL)
+
     def _qid_tag(self, qid: str) -> str:
         return f"[qid:{qid}]"
 
@@ -427,6 +435,7 @@ class QuotesPlugin(Star):
         except Exception:
             pass
         return None
+
 
     def _session_key(self, event: AstrMessageEvent) -> str:
         return str(event.get_group_id() or event.unified_msg_origin)
@@ -492,7 +501,7 @@ class QuotesPlugin(Star):
         help_text = (
             "语录插件帮助\n"
             "- 上传：先回复某人的消息，再发送“上传”（可附带图片）保存为语录。可在消息中 @某人 指定图片语录归属；不@则默认归属上传者。\n"
-            "- 语录：随机发送一条语录；可用“语录 @某人”仅随机该用户的语录；若含用户上传图片，将直接发送原图。\n"
+            "- 语录：随机发送一条语录；可用“语录 @某人”或“指令前缀+语录 12345678”仅随机该用户的语录；若含用户上传图片，将直接发送原图。\n"
             "- 删除：回复机器人刚发送的随机语录消息，发送“删除”或“删除语录”进行删除。\n"
             "- 设置：可在插件设置开启“全局模式”以跨群共享语录；关闭则各群/私聊互相隔离。"
         )
@@ -527,10 +536,7 @@ class QuotesPlugin(Star):
 
     # ============= 内部方法 =============
     def _extract_at_qq(self, event: AstrMessageEvent) -> Optional[str]:
-        """尽可能稳健地提取 @ 对象的 QQ：
-        - 优先从消息链的 Comp.At 段读取（兼容 qq/target/uin/user_id/id 字段）。
-        - 兜底：从纯文本中匹配 "At:123456" 或 "@123456"。
-        """
+        """从消息链 Comp.At 段提取 QQ（不做正则解析）。"""
         try:
             for seg in event.get_messages():  # type: ignore[attr-defined]
                 if isinstance(seg, Comp.At):
@@ -540,16 +546,6 @@ class QuotesPlugin(Star):
                             return str(v)
         except Exception as e:
             logger.warning(f"解析 @ 失败: {e}")
-        # 文本兜底匹配（适配某些平台/日志形态）
-        try:
-            text = (event.message_str or "").strip()
-            m = re.search(r"At[:：]\s*(\d{5,})", text)
-            if not m:
-                m = re.search(r"@\s*(\d{5,})", text)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
         return None
 
     async def _resolve_user_name(self, event: AstrMessageEvent, qq: str) -> str:
@@ -749,8 +745,8 @@ class QuotesPlugin(Star):
 
     # ============= 语录提交中文别名 =============
     @filter.command("上传")
-    async def add_quote_alias(self, event: AstrMessageEvent):
-        async for res in self.add_quote(event):
+    async def add_quote_alias(self, event: AstrMessageEvent, uid: str = ""):
+        async for res in self.add_quote(event, uid=uid):
             yield res
 
     def _strip_at_tokens(self, text: str) -> str:
