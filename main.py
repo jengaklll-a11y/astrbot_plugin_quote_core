@@ -5,12 +5,11 @@ import json
 import random
 import re
 import html
-import base64
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
@@ -48,8 +47,7 @@ class QuoteStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.images_dir = self.root / "images"
         self.images_dir.mkdir(parents=True, exist_ok=True)
-        self.avatars_dir = self.root / "avatars"
-        self.avatars_dir.mkdir(parents=True, exist_ok=True)
+
         self.cache_dir = self.root / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.file = self.root / "quotes.json"
@@ -168,35 +166,7 @@ class QuoteStore:
             self._write({"quotes": self._quotes})
             return True
 
-    async def get_avatar_uri(self, qq: str, enable_cache: bool = True) -> str:
-        """返回头像的 data:URI（若已缓存或成功下载）；否则返回 qlogo 远程 URL。"""
-        size = 640
-        remote = f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s={size}"
-        if not enable_cache:
-            return remote
-        try:
-            p = self.avatars_dir / f"{qq}.png"
-            if p.exists():
-                data = p.read_bytes()
-                b64 = base64.b64encode(data).decode("ascii")
-                return f"data:image/png;base64,{b64}"
-            # 下载并落盘，再返回 dataURI
-            if self._http is None:
-                import httpx
-                async with httpx.AsyncClient(timeout=20) as client:
-                    resp = await client.get(remote)
-                    resp.raise_for_status()
-                    content = resp.content
-            else:
-                resp = await self._http.get(remote)
-                resp.raise_for_status()
-                content = resp.content
-            p.write_bytes(content)
-            b64 = base64.b64encode(content).decode("ascii")
-            return f"data:image/png;base64,{b64}"
-        except Exception as e:
-            logger.info(f"头像缓存失败，回退远程: {e}")
-            return remote
+
 
 
 @register(
@@ -241,12 +211,7 @@ class QuotesPlugin(Star):
             pass
 
     # ============= 指令 =============
-    @filter.command_group("quote")
-    def quote(self):
-        """语录功能命令组（quote ...）"""
-        pass
-
-    # @quote.command("add", alias={"append"})  # disabled: use 顶层指令“上传”
+    # 指令入口
     async def add_quote(self, event: AstrMessageEvent, uid: str = ""):
         """添加语录（上传）。新版用法：
         - 方式一：先『回复某人的消息』，再发送“上传”（可附图）。
@@ -408,33 +373,7 @@ class QuotesPlugin(Star):
         # 仍然直接发 URL
         yield event.image_result(img_url)
 
-    # @quote.command("random")  # disabled: use 顶层指令“语录”
-    async def random_quote_cmd(self, event: AstrMessageEvent):
-        async for res in self.random_quote(event):
-            yield res
-
-    # 适配无斜杠用法：支持“语录 12345678”或“语录 @某人”
-    @filter.event_message_type(filter.EventMessageType.ALL)
-
-    def _qid_tag(self, qid: str) -> str:
-        return f"[qid:{qid}]"
-
-    def _extract_qid_from_onebot_message(self, message) -> Optional[str]:
-        try:
-            if isinstance(message, list):
-                buf: List[str] = []
-                for m in message:
-                    t = (m.get("type") or "").lower()
-                    if t in ("text", "plain"):
-                        d = m.get("data") or {}
-                        buf.append(str(d.get("text") or ""))
-                text = "".join(buf)
-                m = re.search(r"\[qid:([^\]]+)\]", text)
-                if m:
-                    return m.group(1)
-        except Exception:
-            pass
-        return None
+    # 删除了未使用的旧入口与旧版 qid 标记解析，精简结构
 
 
     def _session_key(self, event: AstrMessageEvent) -> str:
@@ -463,18 +402,8 @@ class QuotesPlugin(Star):
             yield event.plain_result("请先『回复机器人发送的语录』，再发送 删除。")
             return
 
-        # 拉取被回复消息内容，解析 [qid:...] 标记（兼容旧消息）
-        qid: Optional[str] = None
-        if event.get_platform_name() == "aiocqhttp":
-            try:
-                client = event.bot
-                ret = await client.api.call_action("get_msg", message_id=int(str(reply_msg_id)))
-                qid = self._extract_qid_from_onebot_message(ret.get("message"))
-            except Exception as e:
-                logger.info(f"读取被回复消息失败：{e}")
-        # 新版消息（不带任何文本标记）回退：删除当前会话最近一次随机发送的语录
-        if not qid:
-            qid = self._last_sent_qid.get(self._session_key(event))
+        # 兼容逻辑回退：删除当前会话最近一次随机发送的语录
+        qid: Optional[str] = self._last_sent_qid.get(self._session_key(event))
         if not qid:
             yield event.plain_result("未能定位语录，请先重新发送一次随机语录再尝试删除。")
             return
