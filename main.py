@@ -143,15 +143,36 @@ class QuoteStore:
             self._quotes.append(asdict(q))
             self._write({"quotes": self._quotes})
 
-    async def random_one(self, group_key: str) -> Optional[Quote]:
-        arr = [x for x in self._quotes if str(x.get("group") or "") == str(group_key)]
+    async def random_one(self, group_key: Optional[str] = None) -> Optional[Quote]:
+        """随机返回一条语录。
+
+        - 当 group_key 为 None 时，忽略群聊隔离键，在所有语录中随机（用于全局模式）。
+        - 当 group_key 为非空字符串时，仅在该 group_key 对应会话内随机。
+        """
+        if group_key is None:
+            arr = list(self._quotes)
+        else:
+            arr = [x for x in self._quotes if str(x.get("group") or "") == str(group_key)]
         if not arr:
             return None
         obj = random.choice(arr)
         return Quote(**obj)
 
-    async def random_one_by_qq(self, qq: str, group_key: str) -> Optional[Quote]:
-        arr = [x for x in self._quotes if str(x.get("qq") or "") == str(qq) and str(x.get("group") or "") == str(group_key)]
+    async def random_one_by_qq(self, qq: str, group_key: Optional[str] = None) -> Optional[Quote]:
+        """按 QQ 过滤后随机返回一条语录。
+
+        - 当 group_key 为 None 时，仅按 QQ 过滤（全局范围）。
+        - 当 group_key 为非空字符串时，按 QQ + 会话隔离键共同过滤。
+        """
+        if group_key is None:
+            arr = [x for x in self._quotes if str(x.get("qq") or "") == str(qq)]
+        else:
+            arr = [
+                x
+                for x in self._quotes
+                if str(x.get("qq") or "") == str(qq)
+                and str(x.get("group") or "") == str(group_key)
+            ]
         if not arr:
             return None
         obj = random.choice(arr)
