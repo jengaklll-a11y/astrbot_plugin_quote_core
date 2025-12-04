@@ -221,6 +221,8 @@ class QuotesPlugin(Star):
         self._cfg_render_cache = bool(self.perf_cfg.get("render_cache", True))
         # 行为设置
         self._cfg_global_mode = bool(self.config.get("global_mode", False))  # True=跨群共享语录，False=按群隔离
+        # 图片签名与戳一戳触发配置（image_signature_use_group 控制是否使用群名片）
+        self._cfg_image_sig_use_group = bool(self.config.get("image_signature_use_group", False))
         # 戳一戳触发配置
         self._cfg_poke_enabled = bool(self.config.get("poke_enabled", True))
         raw_prob = self.config.get("poke_probability", 100)
@@ -388,7 +390,9 @@ class QuotesPlugin(Star):
         if self._cfg_render_cache and cache_path.exists():
             yield event.chain_result([Comp.Image.fromFileSystem(str(cache_path))])
             return
-        img_url = await self._render_quote_image(q)
+        # 仅在需要实际渲染时解析签名文本，减少额外 API 调用
+        signature = await self._resolve_signature_name(event, q)
+        img_url = await self._render_quote_image(q, signature=signature)
         # 尝试缓存渲染结果
         try:
             if self._cfg_render_cache:
@@ -414,13 +418,7 @@ class QuotesPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def random_quote_on_poke(self, event: AstrMessageEvent):
-        """当收到包含 Poke（戳一戳）消息段的事件时，复用随机语录逻辑进行回复。
-
-        说明：
-        - 通过检测消息链中的 Comp.Poke 段来识别戳一戳行为；
-        - 为避免破坏现有行为，仅在存在 Poke 段时触发，并复用 random_quote 的实现；
-        - 不解析具体目标用户，以保持与底层 OneBot/Napcat 语义的解耦。
-        """
+        """当收到“对 Bot 本身的戳一戳”消息段时，复用随机语录逻辑进行回复。"""
         # 总开关：关闭时完全不处理戳一戳事件
         if not getattr(self, "_cfg_poke_enabled", True):
             return
@@ -430,12 +428,19 @@ class QuotesPlugin(Star):
         except Exception:
             return
 
+        self_id = self._get_self_id(event)
+        if not self_id:
+            return
+
         has_poke = False
         for seg in segments:
             try:
                 if isinstance(seg, Comp.Poke):
-                    has_poke = True
-                    break
+                    target = self._extract_poke_target(seg)
+                    # 仅当戳一戳目标为 Bot 本身时才触发
+                    if target and str(target) == str(self_id):
+                        has_poke = True
+                        break
             except Exception:
                 # 保守处理：某些平台可能不存在 Poke 类型，忽略类型判断异常
                 continue
@@ -636,6 +641,56 @@ class QuotesPlugin(Star):
             logger.warning(f"解析 @ 失败: {e}")
         return None
 
+    def _get_self_id(self, event: AstrMessageEvent) -> str:
+        """尝试获取当前 Bot 自身的 QQ / 标识，用于判断戳一戳目标是否为 Bot 本身。
+
+        优先使用 AstrBot 文档中定义的 message_obj.self_id，其次尝试事件上的常见字段，
+        最后回退到 raw_event 等通用结构，所有分支均为“尽最大努力”，失败时返回空字符串。
+        """
+        # 1) AstrBotMessage.self_id（文档保证存在）
+        try:
+            msg = getattr(event, "message_obj", None)
+            if msg is not None:
+                v = getattr(msg, "self_id", None)
+                if v:
+                    return str(v)
+        except Exception as e:
+            logger.info(f"读取 message_obj.self_id 失败，回退：{e}")
+
+        # 2) 事件对象上可能存在的 self_id 字段
+        try:
+            v = getattr(event, "self_id", None)
+            if v:
+                return str(v)
+        except Exception:
+            pass
+
+        # 3) 原始事件结构（如 OneBot/Napcat payload）
+        try:
+            raw = getattr(event, "raw_event", None)
+            if isinstance(raw, dict):
+                v = raw.get("self_id")
+                if v:
+                    return str(v)
+        except Exception:
+            pass
+
+        return ""
+
+    def _extract_poke_target(self, seg: Any) -> Optional[str]:
+        """从 Poke 消息段中提取被戳目标 QQ，用于判断是否戳 Bot 本身。
+
+        兼容多种可能字段名：qq/target/target_id/user_id/uin/id 等。
+        """
+        try:
+            for k in ("qq", "target", "target_id", "user_id", "uin", "id"):
+                v = getattr(seg, k, None)
+                if v:
+                    return str(v)
+        except Exception as e:
+            logger.warning(f"解析 Poke 目标失败: {e}")
+        return None
+
     def _parse_blacklist(self) -> set[str]:
         """从配置中解析语录黑名单 QQ 列表。
 
@@ -695,6 +750,36 @@ class QuotesPlugin(Star):
             except Exception as e:
                 logger.info(f"读取 Napcat 用户信息失败，回退：{e}")
         return str(qq)
+
+    async def _resolve_signature_name(self, event: AstrMessageEvent, q: Quote) -> str:
+        """根据配置决定语录图片右下角签名文本（语录所属成员的群名片或 QQ 名称）。"""
+        # 默认使用语录归属的名称
+        if not getattr(self, "_cfg_image_sig_use_group", False):
+            return q.name
+
+        # 仅在 Napcat/OneBot v11 场景下尝试按群名片显示
+        if event.get_platform_name() == "aiocqhttp":
+            group_id_raw = str(q.group or "").strip()
+            qq_raw = str(q.qq or "").strip()
+            if group_id_raw.isdigit() and qq_raw.isdigit():
+                try:
+                    client = event.bot  # aiocqhttp client
+                    payloads = {
+                        "group_id": int(group_id_raw),
+                        "user_id": int(qq_raw),
+                        "no_cache": True,
+                    }
+                    ret = await client.api.call_action("get_group_member_info", **payloads)
+                    card = (ret.get("card") or "").strip()
+                    nickname = (ret.get("nickname") or "").strip()
+                    if card or nickname:
+                        # 优先群名片，其次当前群内昵称
+                        return card or nickname
+                except Exception as e:
+                    logger.info(f"读取 Napcat 群名片失败，回退：{e}")
+
+        # 其他平台或失败时仍使用 QQ 名称
+        return q.name
 
     def _avatar_url(self, qq: str) -> str:
         # qlogo 头像
@@ -787,7 +872,7 @@ class QuotesPlugin(Star):
             logger.warning(f"解析 Comp.Image 失败: {e}")
         return list(dict.fromkeys(saved))
 
-    async def _render_quote_image(self, q: Quote) -> str:
+    async def _render_quote_image(self, q: Quote, signature: Optional[str] = None) -> str:
         width = int(self.img_cfg.get("width", 1280))
         height = int(self.img_cfg.get("height", 427))
         bg_color = self.img_cfg.get("bg_color", "#000")
@@ -798,6 +883,7 @@ class QuotesPlugin(Star):
         avatar = self._avatar_url(q.qq)
         safe_text = self._strip_at_tokens(q.text)
         escaped_text = html.escape(safe_text)
+        sig_text = (signature or q.name)
         grad_width = max(200, int(width * 0.26))
         grad_left = int(width * 0.36) - int(grad_width * 0.7)
 
@@ -844,8 +930,8 @@ class QuotesPlugin(Star):
                         <span class="quote-mark">」</span>
                     </div>
                 </div>
-                <div class="fade-overlay"></div>
-                <div class="signature">— {q.name}</div>
+	                <div class="fade-overlay"></div>
+	                <div class="signature">— {sig_text}</div>
             </div>
         </body>
         </html>

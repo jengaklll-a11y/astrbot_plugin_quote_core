@@ -39,6 +39,11 @@
       "font_family": { "type": "string", "default": "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'WenQuanYi Micro Hei', Arial, sans-serif" }
     }
   },
+  "image_signature_use_group": {
+    "description": "语录图片右下角签名使用语录所属成员的群名片（群名片/昵称）而不是 QQ 名称",
+    "type": "bool",
+    "default": false
+  },
   "poke_enabled": {
     "description": "是否启用“戳一戳触发随机语录”功能",
     "type": "bool",
