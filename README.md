@@ -20,10 +20,12 @@
 - image：图像样式（宽高/背景色/文字色/字体等）
 - image_signature_use_group：是否让语录图片右下角的签名使用语录所属成员在当前群的群名片（群名片/群昵称）而不是 QQ 名称，布尔值，默认 `false`。开启后会在 Napcat/OneBot v11 场景下优先读取该成员的群名片，获取失败时退回显示 QQ 名称。
 - poke_enabled：是否启用“戳一戳触发随机语录”功能，布尔值，默认 `true`。
-- poke_probability：戳一戳触发随机语录的概率（整数 0-100），默认 `100`。`0` 表示完全不触发，`100` 表示每次戳一戳都触发，中间值表示对应百分比。
+- poke_probability：戳一戳触发随机语录的概率（整数 0-100），默认 `100`。`0` 表示完全不触发，`100` 表示每次戳 Bot 都触发，中间值表示对应百分比。
+- poke_group_whitelist：戳一戳触发的群白名单（群号列表）。当该列表非空时，仅这些群内对 Bot 的戳一戳才会触发随机语录；留空表示不启用白名单。
+- poke_group_blacklist：戳一戳触发的群黑名单（群号列表）。当白名单为空且该列表非空时，这些群内对 Bot 的戳一戳不会触发随机语录；若同时配置白名单，则白名单优先。
 
 数据持久化于 AstrBot 根目录：
 - 文本：`data/quotes/quotes.json`
 - 图片：`data/quotes/images/*`（按群分目录）
 
-Napcat/OneBot 平台默认使用 qlogo 头像
+Napcat/OneBot 平台默认使用 qlogo 头像；也可在配置中改为 platform。

@@ -221,9 +221,9 @@ class QuotesPlugin(Star):
         self._cfg_render_cache = bool(self.perf_cfg.get("render_cache", True))
         # 行为设置
         self._cfg_global_mode = bool(self.config.get("global_mode", False))  # True=跨群共享语录，False=按群隔离
-        # 图片签名与戳一戳触发配置（image_signature_use_group 控制是否使用群名片）
+        # 图片签名与戳一戳触发配置
         self._cfg_image_sig_use_group = bool(self.config.get("image_signature_use_group", False))
-        # 戳一戳触发配置
+        # 戳一戳配置：开关、概率与群黑白名单（仅作用于戳 Bot 本身时的触发）
         self._cfg_poke_enabled = bool(self.config.get("poke_enabled", True))
         raw_prob = self.config.get("poke_probability", 100)
         try:
@@ -232,6 +232,17 @@ class QuotesPlugin(Star):
             prob = 100
         # 限制在 0-100 范围内，表示百分比概率
         self._cfg_poke_probability = max(0, min(100, prob))
+        # 群白名单/黑名单：统一转为字符串集合以便匹配 group_id
+        self._cfg_poke_group_whitelist = {
+            str(x).strip()
+            for x in (self.config.get("poke_group_whitelist") or [])
+            if str(x).strip()
+        }
+        self._cfg_poke_group_blacklist = {
+            str(x).strip()
+            for x in (self.config.get("poke_group_blacklist") or [])
+            if str(x).strip()
+        }
         # 强制显示头像，移除本地头像命中逻辑
         # 发送记录：避免在消息中暴露 qid，通过会话最近记录辅助删除
         self._pending_qid: Dict[str, str] = {}
@@ -418,9 +429,19 @@ class QuotesPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def random_quote_on_poke(self, event: AstrMessageEvent):
-        """当收到“对 Bot 本身的戳一戳”消息段时，复用随机语录逻辑进行回复。"""
-        # 总开关：关闭时完全不处理戳一戳事件
-        if not getattr(self, "_cfg_poke_enabled", True):
+        """当收到“对 Bot 本身的戳一戳”消息段时，按配置随机发送一条语录。"""
+        # 开关关闭则完全不处理戳一戳
+        if not self._cfg_poke_enabled:
+            return
+
+        # 群黑白名单控制：仅群聊生效，私聊不受影响
+        group_id = event.get_group_id()
+        if not self._is_poke_allowed_in_group(group_id):
+            return
+
+        # 仅响应“戳 Bot 本身”的 Poke 段
+        self_id = self._get_self_id(event)
+        if not self_id:
             return
 
         try:
@@ -428,36 +449,30 @@ class QuotesPlugin(Star):
         except Exception:
             return
 
-        self_id = self._get_self_id(event)
-        if not self_id:
-            return
-
-        has_poke = False
+        has_poke_to_bot = False
         for seg in segments:
             try:
                 if isinstance(seg, Comp.Poke):
                     target = self._extract_poke_target(seg)
-                    # 仅当戳一戳目标为 Bot 本身时才触发
                     if target and str(target) == str(self_id):
-                        has_poke = True
+                        has_poke_to_bot = True
                         break
             except Exception:
-                # 保守处理：某些平台可能不存在 Poke 类型，忽略类型判断异常
+                # 某些平台可能不存在 Poke 类型，忽略类型判断异常
                 continue
 
-        if not has_poke:
+        if not has_poke_to_bot:
             return
 
-        # 触发概率控制（百分比 0-100）
-        prob = getattr(self, "_cfg_poke_probability", 100)
+        # 概率控制（百分比 0-100）
+        prob = self._cfg_poke_probability
         if prob <= 0:
             return
         if prob < 100:
-            # 使用加密随机源控制概率
             if secrets.randbelow(100) >= prob:
                 return
 
-        # 复用现有指令逻辑，保持语录选择与渲染策略一致
+        # 复用现有随机语录逻辑
         async for res in self.random_quote(event, uid=""):
             yield res
 
@@ -642,22 +657,22 @@ class QuotesPlugin(Star):
         return None
 
     def _get_self_id(self, event: AstrMessageEvent) -> str:
-        """尝试获取当前 Bot 自身的 QQ / 标识，用于判断戳一戳目标是否为 Bot 本身。
+        """尝试获取当前 Bot 自身的标识（例如 QQ 号），用于判断戳一戳目标是否为 Bot 本身。
 
-        优先使用 AstrBot 文档中定义的 message_obj.self_id，其次尝试事件上的常见字段，
-        最后回退到 raw_event 等通用结构，所有分支均为“尽最大努力”，失败时返回空字符串。
+        优先使用 message_obj.self_id，其次尝试事件上的常见字段，最后回退到 raw_event。
+        如果多次尝试都失败，则返回空字符串。
         """
-        # 1) AstrBotMessage.self_id（文档保证存在）
+        # 1) AstrBotMessage.self_id
         try:
             msg = getattr(event, "message_obj", None)
             if msg is not None:
                 v = getattr(msg, "self_id", None)
                 if v:
                     return str(v)
-        except Exception as e:
-            logger.info(f"读取 message_obj.self_id 失败，回退：{e}")
+        except Exception:
+            pass
 
-        # 2) 事件对象上可能存在的 self_id 字段
+        # 2) 事件对象上的 self_id 字段
         try:
             v = getattr(event, "self_id", None)
             if v:
@@ -678,19 +693,33 @@ class QuotesPlugin(Star):
         return ""
 
     def _extract_poke_target(self, seg: Any) -> Optional[str]:
-        """从 Poke 消息段中提取被戳目标 QQ，用于判断是否戳 Bot 本身。
+        """从 Poke 消息段中提取被戳目标，用于判断是否戳 Bot 本身。
 
-        兼容多种可能字段名：qq/target/target_id/user_id/uin/id 等。
+        尝试兼容多种字段名：qq/target/target_id/user_id/uin/id。
         """
-        try:
-            for k in ("qq", "target", "target_id", "user_id", "uin", "id"):
-                v = getattr(seg, k, None)
-                if v:
-                    return str(v)
-        except Exception as e:
-            logger.warning(f"解析 Poke 目标失败: {e}")
+        for name in ("qq", "target", "target_id", "user_id", "uin", "id"):
+            try:
+                v = getattr(seg, name, None)
+            except Exception:
+                v = None
+            if v:
+                return str(v)
         return None
 
+    def _is_poke_allowed_in_group(self, group_id: Optional[str]) -> bool:
+        """根据群黑白名单配置判断当前群是否允许戳一戳触发。"""
+        if not group_id:
+            # 私聊场景不受群黑白名单影响
+            return True
+        gid = str(group_id)
+        whitelist = getattr(self, "_cfg_poke_group_whitelist", set())
+        blacklist = getattr(self, "_cfg_poke_group_blacklist", set())
+
+        if whitelist:
+            return gid in whitelist
+        if blacklist:
+            return gid not in blacklist
+        return True
     def _parse_blacklist(self) -> set[str]:
         """从配置中解析语录黑名单 QQ 列表。
 
