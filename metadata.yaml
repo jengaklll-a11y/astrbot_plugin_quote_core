@@ -1,5 +1,7 @@
-name: astrbot_quotes_plugin
-desc: qq群聊记录群友说过的话，语录插件
-version: v1.5.0
-author: 薄暝
-repo: https://github.com/xiaoxi68/astrbot_quotes_plugin
+name: astrbot_plugin_quote_core
+display_name: 语录(Core)
+desc: 语录合集
+version: v1.0.0
+author: jengaklll-a11y
+repo: https://github.com/jengaklll-a11y/astrbot_plugin_quote_core
+help:
