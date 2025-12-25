@@ -18,7 +18,7 @@ from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "quotes"
 
-@register(PLUGIN_NAME, "ThinUser", "精简版语录插件(纯文本版)", "2.3.0")
+@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core)", "1.0.0")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
         super().__init__(context)
