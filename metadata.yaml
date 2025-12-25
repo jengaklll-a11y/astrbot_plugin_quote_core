@@ -5,7 +5,7 @@ version: v1.0.0
 author: jengaklll-a11y
 repo: https://github.com/jengaklll-a11y/astrbot_plugin_quote_core
 help: |
-  也是一个语录插件，支持多群隔离、HTML 渲染卡片和长图生成。
+  这是一个语录插件，支持多群隔离、HTML 渲染卡片和长图生成。
 
   指令列表：
   1. /上传 <文字内容> [@某人]
