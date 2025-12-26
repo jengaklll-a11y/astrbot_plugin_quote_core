@@ -58,7 +58,7 @@
 
 ## 📂 数据存储
 
-- 数据文件位于：`data/plugin_data/quotes/quotes.json`
+- 数据文件位于：`data/plugin_data/astrbot_plugin_quote_core/quotes.json`
 - 图片渲染：实时生成，不占用本地磁盘空间。
 
 ## 📦 依赖
