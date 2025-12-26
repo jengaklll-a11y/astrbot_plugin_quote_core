@@ -20,7 +20,6 @@ from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "quotes"
 
-# --- 修复：移除 Repo URL 参数，确保只有 5 个参数 ---
 @register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core)", "1.0.0", "支持多群隔离、HTML卡片渲染和长图生成的语录插件")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
@@ -96,10 +95,10 @@ class QuotesPlugin(Star):
         # 为了更稳妥，我们只处理“完全不带前缀”的关键词。
         
         # 简单的路由映射
-        # 注意：这里使用全匹配或正则开头，确保 "语录 10" 能匹配，但 "语录测试" 不会误触
+        # 正则含义：以关键词开头，后面紧跟 (空格+任意内容) 或 (数字+任意内容) 或 (结束)
         route_map = {
             r"^上传$|^添加语录$": self._logic_add,
-            r"^语录(\s.*)?$|^随机语录(\s.*)?$|^抽卡(\s.*)?$": self._logic_random,
+            r"^(语录|随机语录|抽卡)([\s\d].*)?$": self._logic_random,
             r"^删除$|^删除语录$": self._logic_delete
         }
 
@@ -136,8 +135,9 @@ class QuotesPlugin(Star):
         nickname = (sender.get("nickname") or "").strip()
         target_name = card or nickname or target_qq
 
+        # --- 修改点：文案已更新 ---
         if not target_text:
-            yield event.plain_result("收录失败：无法提取文本内容。")
+            yield event.plain_result("收录失败：无法提取非文本内容。")
             return
         if not target_qq:
             yield event.plain_result("收录失败：无法获取发送者信息。")
