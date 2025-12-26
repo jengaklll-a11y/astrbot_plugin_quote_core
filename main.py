@@ -18,17 +18,28 @@ from .model import Quote
 from .dao import QuoteStore
 from .renderer import QuoteRenderer
 
-PLUGIN_NAME = "quotes"
+# 定义插件数据文件夹名称 (保持原样，防止数据丢失)
+PLUGIN_NAME = "astrbot_plugin_quote_core"
 
-@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core)", "1.0.0", "支持多群隔离、HTML卡片渲染和长图生成的语录插件")
+@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core)", "1.0.1", "支持多群隔离、HTML卡片渲染和长图生成的语录插件")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
         super().__init__(context)
         self.config = config or {}
+        
+        # [Fixed] 回退到最稳妥的路径定义方式，解决 ImportError
         self.data_dir = Path(f"data/plugin_data/{PLUGIN_NAME}")
         self.store = QuoteStore(self.data_dir)
+        
         self._last_sent_qid: Dict[str, str] = {}
         self._poke_cooldowns: Dict[str, float] = {}
+
+        # [Optimization] 保留正则预编译优化
+        self.regex_routes = [
+            (re.compile(r"^上传$|^添加语录$"), self._logic_add),
+            (re.compile(r"^(语录|随机语录|抽卡)([\s\d].*)?$"), self._logic_random),
+            (re.compile(r"^删除$|^删除语录$"), self._logic_delete)
+        ]
 
     # ================= 1. 显式指令注册 (UI显示用) =================
     
@@ -76,11 +87,11 @@ class QuotesPlugin(Star):
             return
 
         # --- B. 无前缀指令检测 ---
-        # 如果未开启忽略前缀，直接返回 (标准指令由上面的 @filter.command 处理)
+        # 如果未开启忽略前缀，直接返回
         if not self.config.get("ignore_prefix", False):
             return
 
-        # 提取纯文本 (剔除 At、图片等，实现无视 At 位置)
+        # 提取纯文本 (剔除 At、图片等)
         raw_text = ""
         for seg in event.message_obj.message:
             if isinstance(seg, Comp.Plain):
@@ -90,29 +101,17 @@ class QuotesPlugin(Star):
         if not clean_text:
             return
 
-        # 防止双重触发：如果消息以 "/" 开头 (假设标准前缀是 /)，则认为已被标准指令捕获
-        # 注意：这里假设 Bot 前缀包含 /。如果您的 Bot 设置了其他前缀，这里可能需要调整。
-        # 为了更稳妥，我们只处理“完全不带前缀”的关键词。
-        
-        # 简单的路由映射
-        # 正则含义：以关键词开头，后面紧跟 (空格+任意内容) 或 (数字+任意内容) 或 (结束)
-        route_map = {
-            r"^上传$|^添加语录$": self._logic_add,
-            r"^(语录|随机语录|抽卡)([\s\d].*)?$": self._logic_random,
-            r"^删除$|^删除语录$": self._logic_delete
-        }
-
+        # [Optimization] 使用预编译的正则进行匹配
         matched_logic = None
-        for pattern, logic_func in route_map.items():
-            # 如果匹配成功，且字符串开头不是常见指令前缀 (避免和标准指令冲突)
-            if re.match(pattern, clean_text) and not clean_text.startswith(("/", "!", "！")):
+        for pattern, logic_func in self.regex_routes:
+            # 如果匹配成功，且字符串开头不是常见指令前缀
+            if pattern.match(clean_text) and not clean_text.startswith(("/", "!", "！")):
                 matched_logic = logic_func
                 break
         
         if matched_logic:
             async for res in matched_logic(event):
                 yield res
-
 
     # ================= 3. 核心业务逻辑 (复用) =================
 
@@ -135,7 +134,6 @@ class QuotesPlugin(Star):
         nickname = (sender.get("nickname") or "").strip()
         target_name = card or nickname or target_qq
 
-        # --- 修改点：文案已更新 ---
         if not target_text:
             yield event.plain_result("收录失败：无法提取非文本内容。")
             return
@@ -168,7 +166,7 @@ class QuotesPlugin(Star):
         target_qq = None
         target_count = 1 
         
-        # 解析 At 和 数字 (无论它们在文本的哪里)
+        # 解析 At 和 数字
         for seg in event.message_obj.message:
             if isinstance(seg, Comp.At):
                 target_qq = str(seg.qq)
@@ -322,9 +320,6 @@ class QuotesPlugin(Star):
                 yield event.plain_result("歇一会儿再戳吧~")
                 return
             self._poke_cooldowns[group_id] = now
-            # 戳一戳触发随机语录 (复用 _logic_random)
-            # 注意：这里需要传入 event，_logic_random 会解析文本找数字/At。
-            # 戳一戳事件通常没有文本，所以正好符合“无参随机”的逻辑。
             async for res in self._logic_random(event):
                 yield res
 
