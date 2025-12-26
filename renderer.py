@@ -3,6 +3,21 @@ from datetime import datetime
 from typing import List, Tuple, Dict, Any
 from .model import Quote
 
+# --- HTML 模板常量 (Templates) ---
+
+# [Modified] 恢复了 Google Fonts 引用
+# 注意：这需要你的服务器能够连接到 fonts.googleapis.com，否则渲染可能会超时
+COMMON_CSS = """
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+    * { box-sizing: border-box; }
+    body {
+        margin: 0; padding: 0;
+        background: #111111;
+        font-family: 'Noto Sans SC', sans-serif;
+        -webkit-font-smoothing: antialiased;
+    }
+"""
+
 class QuoteRenderer:
     """视图层：负责生成 HTML 和渲染配置"""
     
@@ -18,100 +33,49 @@ class QuoteRenderer:
             return QuoteRenderer._render_feed_card(q, index, total)
 
     @staticmethod
-    def _render_feed_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
-        """布局A：朋友圈/Feed流风格 (整体放大版)"""
-        width = 1500
-        
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={q.qq}&s=640"
-        safe_text = html.escape(q.text)
-        safe_name = html.escape(q.name)
-        
+    def _get_time_text(created_at: float) -> str:
+        """辅助方法：格式化时间"""
         try:
-            dt = datetime.fromtimestamp(q.created_at)
+            dt = datetime.fromtimestamp(created_at)
             months = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", 
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
             month_str = months[dt.month]
-            time_text = f"{dt.day:02d} {month_str} {dt.year} {dt.strftime('%H:%M')}"
+            return f"{dt.day:02d} {month_str} {dt.year} {dt.strftime('%H:%M')}"
         except:
-            time_text = ""
+            return ""
 
+    @staticmethod
+    def _render_feed_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
+        """布局A：朋友圈/Feed流风格 (整体放大版)"""
+        width = 1500
+        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={q.qq}&s=640"
+        safe_text = html.escape(q.text)
+        safe_name = html.escape(q.name)
+        time_text = QuoteRenderer._get_time_text(q.created_at)
         count_text = f"#{index} / {total}" if total > 0 else "AstrBot"
         
         html_content = f"""
         <html>
         <head>
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
-                * {{ box-sizing: border-box; }}
-                html, body {{
-                    margin: 0; padding: 0;
-                    background: #111111;
-                    font-family: 'Noto Sans SC', sans-serif;
-                    width: {width}px;
-                    max-width: {width}px;
-                    height: auto;
-                    -webkit-font-smoothing: antialiased;
-                }}
-                
+                {COMMON_CSS}
                 body {{
-                    /* 加大留白，适应大字体 */
+                    width: {width}px; max-width: {width}px;
                     padding: 100px;
-                    display: flex;
-                    flex-direction: column;
+                    display: flex; flex-direction: column;
                 }}
-                
-                .feed-container {{
-                    width: 100%;
-                    display: flex; 
-                    flex-direction: row; 
-                    align-items: flex-start;
-                }}
-                
-                /* 头像区域放大 */
+                .feed-container {{ width: 100%; display: flex; flex-direction: row; align-items: flex-start; }}
                 .avatar-box {{ margin-right: 60px; flex-shrink: 0; }}
-                .avatar {{ 
-                    width: 180px; height: 180px; /* 增大头像 */
-                    border-radius: 24px; 
-                    object-fit: cover; 
-                    background: #333; 
-                }}
-                
+                .avatar {{ width: 180px; height: 180px; border-radius: 24px; object-fit: cover; background: #333; }}
                 .content-box {{ flex: 1; display: flex; flex-direction: column; padding-top: 8px; }}
-                
-                /* 字体整体放大 */
-                .nickname {{ 
-                    font-size: 64px; /* 48 -> 64 */
-                    font-weight: 600; 
-                    color: #7CA0C8; 
-                    margin-bottom: 30px; 
-                    line-height: 1.2; 
-                }}
-                
-                .text-body {{ 
-                    font-size: 70px; /* 52 -> 70 */
-                    color: #FFFFFF; 
-                    line-height: 1.5; 
-                    margin-bottom: 50px; 
-                    word-wrap: break-word; 
-                    white-space: pre-wrap; 
-                }}
-                
-                .footer-info {{ 
-                    font-size: 40px; /* 30 -> 40 */
-                    color: #777777; 
-                    display: flex; align-items: center; justify-content: space-between; 
-                    width: 100%; margin-top: 15px; 
-                }}
-                
+                .nickname {{ font-size: 64px; font-weight: 600; color: #7CA0C8; margin-bottom: 30px; line-height: 1.2; }}
+                .text-body {{ font-size: 70px; color: #FFFFFF; line-height: 1.5; margin-bottom: 50px; word-wrap: break-word; white-space: pre-wrap; }}
+                .footer-info {{ font-size: 40px; color: #777777; display: flex; align-items: center; justify-content: space-between; width: 100%; margin-top: 15px; }}
                 .count-tag {{
                     display: inline-block; background: #222; color: #888;
-                    padding: 8px 24px; /* 加大标签内边距 */
-                    border-radius: 12px; border: 1px solid #333;
+                    padding: 8px 24px; border-radius: 12px; border: 1px solid #333;
                     box-shadow: 8px 8px 0px rgba(255, 255, 255, 0.1); 
-                    font-family: 'Consolas', 'Monaco', monospace; 
-                    font-size: 36px; /* 28 -> 36 */
-                    font-weight: bold; 
-                    letter-spacing: 2px;
+                    font-family: 'Consolas', 'Monaco', monospace; font-size: 36px; font-weight: bold; letter-spacing: 2px;
                 }}
             </style>
         </head>
@@ -130,44 +94,29 @@ class QuoteRenderer:
         </body>
         </html>
         """
-        # 视口高度设为 1，依赖 full_page=True 自动扩展
         options = {"full_page": True, "viewport": {"width": width, "height": 1}}
         return html_content, options
 
     @staticmethod
     def _render_vertical_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
-        """布局B：垂直宽幅卡片 (保持不变)"""
+        """布局B：垂直宽幅卡片"""
         width = 1500  
         min_height = 800
-        
         avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={q.qq}&s=640"
         safe_text = html.escape(q.text)
         safe_name = html.escape(q.name)
-        
-        try:
-            dt = datetime.fromtimestamp(q.created_at)
-            months = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", 
-                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-            month_str = months[dt.month]
-            time_text = f"{dt.day:02d} {month_str} {dt.year} {dt.strftime('%H:%M')}"
-        except:
-            time_text = ""
-
+        time_text = QuoteRenderer._get_time_text(q.created_at)
         count_text = f"#{index} / {total}" if total > 0 else "AstrBot"
         
         html_content = f"""
         <html>
         <head>
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;700&display=swap');
-                * {{ box-sizing: border-box; }}
+                {COMMON_CSS}
                 body {{ 
-                    margin: 0; padding: 0;
-                    background: #121212;
-                    font-family: 'Noto Sans SC', sans-serif; 
                     width: 100%; min-height: {min_height}px; height: auto;
                     display: flex; flex-direction: column; align-items: center; justify-content: center;
-                    padding: 80px; -webkit-font-smoothing: antialiased;
+                    padding: 80px; background: #121212;
                 }}
                 .card {{
                     width: 100%; background: #1E1E1E; border-radius: 24px;
@@ -250,13 +199,11 @@ class QuoteRenderer:
         <html>
         <head>
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
-                * {{ box-sizing: border-box; }}
+                {COMMON_CSS}
                 body {{
-                    margin: 0; padding: 0; background-color: #121212;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
                     width: 100%; min-height: 100vh; color: #fff;
                     display: flex; flex-direction: column; align-items: center; 
+                    background-color: #121212;
                 }}
                 .main-wrapper {{
                     width: 100%; display: flex; flex-direction: column; align-items: center;
