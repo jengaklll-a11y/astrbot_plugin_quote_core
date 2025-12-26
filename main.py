@@ -20,7 +20,7 @@ from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "quotes"
 
-# --- 修正点：去掉了 repo 参数，只保留 5 个参数 ---
+# --- 修复：移除 Repo URL 参数，确保只有 5 个参数 ---
 @register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core)", "1.0.0", "支持多群隔离、HTML卡片渲染和长图生成的语录插件")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
