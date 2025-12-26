@@ -1,13 +1,31 @@
 {
-  "storage": {
-    "description": "数据存储路径 (可选)",
+  "poke_mode": {
+    "description": "戳一戳响应模式",
     "type": "string",
-    "default": ""
+    "options": ["关闭", "仅戳Bot", "任意戳"],
+    "default": "仅戳Bot"
   },
-  "poke_enabled": {
-    "description": "是否开启戳一戳触发语录",
+  "poke_cooldown": {
+    "description": "戳一戳触发冷却时间 (秒)",
+    "type": "int",
+    "default": 10
+  },
+  "max_batch_count": {
+    "description": "单次随机抽卡/合集的最大条数限制",
+    "type": "int",
+    "default": 10
+  },
+  "ignore_prefix": {
+    "description": "是否忽略指令前缀",
+    "hint": "开启后直接发送 '语录'、'上传' 即可触发，无需前缀)",
     "type": "bool",
-    "default": true
+    "default": false
+  },
+  "global_mode": {
+    "description": "开启跨群共享",
+    "hint": "开启后随机语录将从所有群抽取，关闭则仅随机当前群",
+    "type": "bool",
+    "default": false
   },
   "admin_only": {
     "description": "是否仅允许管理员删除语录",
