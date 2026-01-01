@@ -1,6 +1,6 @@
 name: astrbot_plugin_quote_core
 display_name: 语录(Core)
-desc: 支持多群隔离、HTML卡片渲染和长图生成的语录插件
+desc: 支持多群隔离/多群混合、HTML卡片渲染和长图生成、一键捕捉上传的语录插件
 version: v2.0.0
 author: jengaklll-a11y
 repo: https://github.com/jengaklll-a11y/astrbot_plugin_quote_core
