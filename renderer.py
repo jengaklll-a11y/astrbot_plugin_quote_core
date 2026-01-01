@@ -1,12 +1,11 @@
 import html
+import time
 from datetime import datetime
 from typing import List, Tuple, Dict, Any
 from .model import Quote
 
 # --- HTML 模板常量 (Templates) ---
 
-# [Modified] 恢复了 Google Fonts 引用
-# 注意：这需要你的服务器能够连接到 fonts.googleapis.com，否则渲染可能会超时
 COMMON_CSS = """
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
     * { box-sizing: border-box; }
@@ -23,7 +22,7 @@ class QuoteRenderer:
     
     @staticmethod
     def render_single_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
-        """渲染单条语录 - 智能分流入口"""
+        """渲染单条语录"""
         # 阈值：超过 60 字或换行过多使用长文本模式
         is_long_text = len(q.text) > 60 or q.text.count('\n') > 4
         
@@ -45,10 +44,17 @@ class QuoteRenderer:
             return ""
 
     @staticmethod
+    def _get_avatar_url(qq: str) -> str:
+        """获取带时间戳的头像 URL，强制刷新缓存"""
+        timestamp = int(time.time())
+        return f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640&v={timestamp}"
+
+    @staticmethod
     def _render_feed_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
-        """布局A：朋友圈/Feed流风格 (整体放大版)"""
+        """布局A：朋友圈/Feed流风格"""
         width = 1500
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={q.qq}&s=640"
+        avatar_url = QuoteRenderer._get_avatar_url(q.qq)
+        
         safe_text = html.escape(q.text)
         safe_name = html.escape(q.name)
         time_text = QuoteRenderer._get_time_text(q.created_at)
@@ -75,7 +81,7 @@ class QuoteRenderer:
                     display: inline-block; background: #222; color: #888;
                     padding: 8px 24px; border-radius: 12px; border: 1px solid #333;
                     box-shadow: 8px 8px 0px rgba(255, 255, 255, 0.1); 
-                    font-family: 'Consolas', 'Monaco', monospace; font-size: 36px; font-weight: bold; letter-spacing: 2px;
+                    font-family: 'Noto Sans SC', sans-serif; font-size: 36px; font-weight: bold; letter-spacing: 2px;
                 }}
             </style>
         </head>
@@ -102,7 +108,8 @@ class QuoteRenderer:
         """布局B：垂直宽幅卡片"""
         width = 1500  
         min_height = 800
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={q.qq}&s=640"
+        avatar_url = QuoteRenderer._get_avatar_url(q.qq)
+
         safe_text = html.escape(q.text)
         safe_name = html.escape(q.name)
         time_text = QuoteRenderer._get_time_text(q.created_at)
@@ -137,7 +144,7 @@ class QuoteRenderer:
                     display: inline-block; background: #222; color: #888;
                     padding: 4px 14px; border-radius: 8px; border: 1px solid #333;
                     box-shadow: 5px 5px 0px rgba(255, 255, 255, 0.1); 
-                    font-family: 'Consolas', 'Monaco', monospace; font-size: 26px; font-weight: bold; letter-spacing: 1px;
+                    font-family: 'Noto Sans SC', sans-serif; font-size: 26px; font-weight: bold; letter-spacing: 1px;
                 }}
             </style>
         </head>
@@ -165,8 +172,8 @@ class QuoteRenderer:
 
     @staticmethod
     def render_merged_card(quotes: List[Quote], qq: str, name: str, show_author: bool = False) -> Tuple[str, Dict[str, Any]]:
-        """渲染合集长图"""
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640"
+        """渲染合集长图 (已增强：显示时间、理由、底部栏)"""
+        avatar_url = QuoteRenderer._get_avatar_url(qq)
         safe_name = html.escape(name)
         view_width = 1000
         
@@ -175,23 +182,40 @@ class QuoteRenderer:
             text = html.escape(q.text)
             if not text: continue
             
+            # 字体大小适配
             item_font_size = 46 if len(q.text) < 50 else 38
             
-            author_html = ""
+            # 1. 理由部分
+            reason_html = ""
+            if hasattr(q, "ai_reason") and q.ai_reason:
+                safe_reason = html.escape(q.ai_reason)
+                reason_html = f'<div class="ai-reason">💡 <b>Bot:</b> {safe_reason}</div>'
+
+            # 2. 底部栏 (时间 + 可选作者信息)
+            time_text = QuoteRenderer._get_time_text(q.created_at)
+            
+            right_side_html = ""
             if show_author:
-                sub_avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={q.qq}&s=640"
-                author_html = f"""
-                <div class="card-footer">
-                    <img class="sub-avatar" src="{sub_avatar_url}">
-                    <div class="card-author">—— {html.escape(q.name)}</div>
+                # 随机/AI模式：右侧显示头像和名字
+                sub_avatar_url = QuoteRenderer._get_avatar_url(q.qq)
+                right_side_html = f"""
+                <div class="footer-author-box">
+                    <span class="footer-author-name">{html.escape(q.name)}</span>
+                    <img class="footer-avatar" src="{sub_avatar_url}">
                 </div>
                 """
-                
+            
+            # 3. 组装单个卡片 HTML
             quotes_list_html += f"""
             <div class="card">
                 <div class="card-header"><span class="index-tag">#{i+1}</span></div>
                 <div class="card-content" style="font-size: {item_font_size}px;">{text}</div>
-                {author_html}
+                {reason_html}
+                <div class="card-divider"></div>
+                <div class="card-footer-bar">
+                    <span class="footer-time">{time_text}</span>
+                    {right_side_html}
+                </div>
             </div>
             """
 
@@ -236,18 +260,34 @@ class QuoteRenderer:
                 }}
                 .card-content {{
                     line-height: 1.5; color: #E0E0E0; font-weight: 400; text-align: left;
-                    word-wrap: break-word; word-break: break-word; white-space: pre-wrap;
+                    word-wrap: break-word; word-break: break-word; white-space: pre-wrap; margin-bottom: 20px;
                 }}
-                .card-footer {{
-                    display: flex; flex-direction: column; align-items: flex-end; margin-top: 35px;
+                .ai-reason {{
+                    margin-top: 15px; margin-bottom: 20px; padding: 16px 20px;
+                    background: rgba(255, 255, 255, 0.05);
+                    border-left: 6px solid #d08770;
+                    color: #aaa; font-size: 28px;
+                    border-radius: 4px; line-height: 1.4;
                 }}
-                .sub-avatar {{
-                    width: 90px; height: 90px; border-radius: 12px; object-fit: cover; 
-                    border: 2px solid #333; margin-bottom: 15px;
-                    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+                .card-divider {{
+                    width: 100%; height: 1px; background: #333; margin: 25px 0 20px 0;
                 }}
-                .card-author {{
-                    color: #7CA0C8; font-size: 30px; font-weight: 400;
+                .card-footer-bar {{
+                    display: flex; align-items: center; justify-content: space-between;
+                    width: 100%;
+                }}
+                .footer-time {{
+                    font-size: 26px; color: #777; font-weight: 400;
+                    /* 移除了 font-family: Consolas，继承默认的 Noto Sans SC */
+                }}
+                .footer-author-box {{
+                    display: flex; align-items: center;
+                }}
+                .footer-author-name {{
+                    font-size: 28px; color: #7CA0C8; margin-right: 15px;
+                }}
+                .footer-avatar {{
+                    width: 60px; height: 60px; border-radius: 10px; object-fit: cover; border: 1px solid #444;
                 }}
             </style>
         </head>
