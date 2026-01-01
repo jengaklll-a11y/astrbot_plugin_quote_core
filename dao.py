@@ -34,6 +34,16 @@ class QuoteStore:
         clean_data = {k: v for k, v in data.items() if k in valid_keys}
         return Quote(**clean_data)
 
+    # [新增] 查重方法
+    def check_exists(self, group_id: str, text: str) -> bool:
+        """检查指定群是否已存在相同文本"""
+        target_text = text.strip()
+        for q in self._cache:
+            # 必须是同群且文本相同 (忽略首尾空格)
+            if str(q.get("group")) == str(group_id) and q.get("text", "").strip() == target_text:
+                return True
+        return False
+
     async def add_quote(self, quote: Quote):
         q_dict = dataclasses.asdict(quote)
         self._cache.append(q_dict)
@@ -57,7 +67,6 @@ class QuoteStore:
         """获取随机语录批次 (用于抽卡)"""
         candidates = []
         for q in self._cache:
-            # 同样支持 global_mode (group_id 为 None 时)
             if group_id is not None and str(q.get("group")) != str(group_id):
                 continue
             candidates.append(q)
@@ -65,7 +74,6 @@ class QuoteStore:
         if not candidates:
             return []
             
-        # 如果请求数量大于库存，返回全部；否则随机抽取
         sample_size = min(len(candidates), count)
         selected = random.sample(candidates, sample_size)
         return [self._safe_to_quote(x) for x in selected]
