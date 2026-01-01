@@ -1,7 +1,7 @@
 name: astrbot_plugin_quote_core
 display_name: 语录(Core)
 desc: 支持多群隔离、HTML卡片渲染和长图生成的语录插件
-version: v1.0.0
+version: v2.0.0
 author: jengaklll-a11y
 repo: https://github.com/jengaklll-a11y/astrbot_plugin_quote_core
 help: |
@@ -26,6 +26,10 @@ help: |
   • 说明：仅能删除机器人最近一次发送的语录。
   • 权限：默认全员可删，可在配置中开启 admin_only 限制仅管理员可删。
 
-  4. 其他触发方式
+  4. 一键金句
+  • 指令：/一键金句
+  • 说明：[AI] 立即分析最近聊天记录并挖掘金句。
+  
+  5. 其他触发方式
   • 戳一戳：戳一戳机器人头像，可随机发送语录 (需开启配置 poke_mode)。
   • 无前缀：若开启 ignore_prefix 配置，直接发送“语录”、“上传”等关键词即可触发。
