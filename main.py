@@ -26,7 +26,7 @@ from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "astrbot_plugin_quote_core"
 
-@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core) Pro", "2.0.0", "优化：滑动条控制自动挖掘间隔")
+@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core) ", "2.0.0", "优化：滑动条控制自动挖掘间隔")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
         super().__init__(context)
