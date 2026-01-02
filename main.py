@@ -21,7 +21,7 @@ from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "astrbot_plugin_quote_core"
 
-@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core) Pro", "2.2.5", "修改：AI挖掘统一使用合集模板")
+@register(PLUGIN_NAME, "jengaklll-a11y", "支持多群隔离/混合、HTML卡片渲染和长图生成、Ai一键捕捉上传", "2.0.1")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
         super().__init__(context)
