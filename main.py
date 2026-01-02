@@ -21,7 +21,7 @@ from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "astrbot_plugin_quote_core"
 
-@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core) Pro", "1.9.5", "新增：卡片联动与调试开关")
+@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core) Pro", "2.2.5", "修改：AI挖掘统一使用合集模板")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
         super().__init__(context)
@@ -100,10 +100,10 @@ class QuotesPlugin(Star):
         ret = await self._fetch_onebot_msg(event, reply_msg_id)
         target_text = self._extract_plaintext_from_onebot_message(ret.get("message"))
         sender = ret.get("sender") or {}
+        origin_time = ret.get("time") 
         
         if target_text and sender:
-            res = await self._save_quote_core(event, target_text, sender, str(event.get_group_id()))
-            
+            res = await self._save_quote_core(event, target_text, sender, str(event.get_group_id()), origin_time)
             if res == "IS_BOT":
                 yield event.plain_result("⚠️ 无法收录：不可以收录机器人发送的消息哦。")
             elif res == "DUPLICATE":
@@ -119,6 +119,10 @@ class QuotesPlugin(Star):
         """逻辑：AI 分析"""
         group_id = str(event.get_group_id())
         self_id = self._get_self_id(event)
+        
+        # 获取黑名单
+        blacklist = self.config.get("user_blacklist", [])
+        if not isinstance(blacklist, list): blacklist = []
         
         # 1. 确定使用的 Provider
         provider = None
@@ -144,8 +148,8 @@ class QuotesPlugin(Star):
         
         yield event.plain_result(f"[{model_name}] 正在深挖最近 {max_history} 条消息...")
         
-        # 调用移植自画像插件的抓取逻辑
-        history_msgs = await self._fetch_group_history_from_server(event, group_id, count=max_history)
+        # [NEW] 使用移植自画像插件的新抓取逻辑
+        history_msgs = await self._fetch_history_robust_main(event, group_id, max_history)
         
         if len(history_msgs) < 5:
             yield event.plain_result("❌ 拉取到的历史消息过少，无法分析。")
@@ -159,7 +163,11 @@ class QuotesPlugin(Star):
             sender = m.get("sender", {})
             sender_id = str(sender.get("user_id", ""))
             
+            # 过滤机器人自己
             if self_id and sender_id == self_id: continue
+            
+            # 过滤黑名单用户
+            if sender_id in blacklist: continue
 
             raw_msg = m.get("message", [])
             text = self._extract_plaintext_from_onebot_message(raw_msg)
@@ -168,23 +176,25 @@ class QuotesPlugin(Star):
             if self.store.check_exists(group_id, text): continue
 
             name = sender.get("card") or sender.get("nickname") or "未知"
+            # 存入 map，key 为文本，value 为完整消息对象（包含 time）
             valid_msgs_map[text] = m
             msgs_text.append(f"[{name}]: {text}")
         
         if not msgs_text:
-            yield event.plain_result("最近的消息要么是机器人发的，要么已经被收录过啦！")
+            yield event.plain_result("最近的消息要么是机器人发的，要么被黑名单拦截，要么已经被收录过啦！")
             return
 
         context_str = "\n".join(msgs_text)
         
-        # 4. 获取 Prompt
+        # 4. 获取 Prompt (已进行安全化处理)
         default_prompt_lines = [
             "请作为一名眼光极高的“金句鉴赏家”，从以下群聊记录中挑选出 **{max_golden_quotes}** 句最具备“金句”潜质的发言。",
             "",
             "## 判定标准（宁缺毋滥）：",
-            "1. **核心标准**：**逆天的神人发言**。必须具备颠覆常识的脑洞、逻辑跳脱的表达、强烈反差感或极致的抽象。",
+            "1. **核心标准**：**极为精彩的发言**。必须具备颠覆常识的脑洞、逻辑跳脱的表达、强烈反差感或独特的抽象思维。",
             "2. **典型特征**：包含争议话题元素、夸张类比、反常规结论、一本正经的「胡说八道」或突破语境的清奇思路。",
-            "3. **拒绝平庸**：**绝对不要选**普通的日常对话、单纯的玩梗复读、水群废话（如“早安”、“哈哈哈”）。",
+            "3. **收录偏好**：优先选择那些**令人意想不到的神回复**、**强烈的情绪宣泄**（如极度的愤怒或兴奋）、或者**充满哲理的荒谬言论**。",
+            "4. **拒绝平庸**：**绝对不要选**普通的日常对话、单纯的玩梗复读、水群废话（如“早安”、“哈哈哈”）。",
             "",
             "## 聊天记录：",
             "{context}",
@@ -193,37 +203,40 @@ class QuotesPlugin(Star):
             "请仅返回一个纯 JSON **数组**（Array），不要包含 Markdown 标记。",
             "**重要：**如果聊天记录中没有符合标准的金句，该项的 content 请填 \"NULL\"。",
             "[",
-            "  {",
+            "  {{", 
             "    \"content\": \"金句原文(如果没有满意的请填 NULL)\",",
             "    \"reason\": \"入选理由\"",
-            "  }",
+            "  }}", 
             "]"
         ]
-        default_prompt = "\n".join(default_prompt_lines)
-        
-        prompt_tmpl = self.config.get("analysis_prompt", default_prompt)
-        
-        if "{context}" not in prompt_tmpl: prompt_tmpl += "\n\nChat Context:\n{context}"
+        prompt_tmpl = "\n".join(default_prompt_lines)
 
         try:
             prompt = prompt_tmpl.format(context=context_str, max_golden_quotes=max_quotes)
         except Exception as e:
             logger.error(f"Prompt formatting failed: {e}")
-            yield event.plain_result(f"❌ 提示词模板错误: {e}")
+            yield event.plain_result(f"❌ 提示词构建错误: {e}")
             return
 
         # 5. 调用 LLM
         try:
             resp = await provider.text_chat(prompt, session_id=None)
-            llm_text = resp.completion_text.strip()
             
-            # [Update] 仅在调试模式开启时打印日志
-            if self.config.get("debug_mode", False):
-                logger.info(f"[DEBUG] AI 金句分析原始返回: {llm_text}") 
+            # [Fix] 增加对 None 或空对象的防御性检查
+            if not resp or not hasattr(resp, "completion_text") or not resp.completion_text:
+                yield event.plain_result("⚠️ AI 似乎拒绝了请求（可能是触发了安全过滤器），建议更换模型或重试。")
+                return
+
+            llm_text = resp.completion_text.strip()
             
             if llm_text.startswith("```json"): llm_text = llm_text[7:]
             if llm_text.endswith("```"): llm_text = llm_text[:-3]
-            raw_data = json.loads(llm_text.strip())
+            
+            try:
+                raw_data = json.loads(llm_text.strip())
+            except json.JSONDecodeError:
+                yield event.plain_result("⚠️ AI 返回了无效的 JSON 格式，无法解析。")
+                return
             
             data_list = []
             if isinstance(raw_data, list):
@@ -256,23 +269,18 @@ class QuotesPlugin(Star):
                 
                 if matched_msg:
                     sender = matched_msg.get("sender", {})
-                    res = await self._save_quote_core(event, content, sender, group_id)
+                    origin_time = matched_msg.get("time")
+                    res = await self._save_quote_core(event, content, sender, group_id, origin_time)
                     
                     if isinstance(res, Quote):
+                        res.ai_reason = reason
                         saved_quotes.append(res)
-                        # 如果需要查看理由，可以在这里 log 一下
-                        logger.info(f"挖掘成功: {content} (理由: {reason})")
+                        logger.info(f"挖掘成功: {content} (理由: {reason}, Time: {origin_time})")
                     elif res == "DUPLICATE":
-                         # 可选：提示重复
-                         # yield event.plain_result(f"⚠️ AI 推荐了：{content} (已存在，跳过)")
                          pass
-                else:
-                    if self.config.get("debug_mode", False):
-                        logger.debug(f"AI 幻觉: 无法在记录中找到 '{content}'")
 
-            # 6. 结果展示 (卡片联动)
+            # 6. 结果展示
             if not saved_quotes:
-                # 只有当全部都是 NULL，或者全部都找不到原文时才提示
                 if any(x.get("content", "").upper() != "NULL" for x in data_list):
                     yield event.plain_result("🤔 AI 推荐了一些内容，但它们要么是重复的，要么我没在记录里找到原文。")
                 else:
@@ -280,209 +288,156 @@ class QuotesPlugin(Star):
             else:
                 yield event.plain_result(f"🎉 成功挖掘 {len(saved_quotes)} 条金句！正在生成语录卡片...")
                 
-                # 如果只有1条，展示单人详细卡片
-                if len(saved_quotes) == 1:
-                    quote = saved_quotes[0]
-                    
-                    # 获取该用户在当前群的总语录数，用于显示 "第 X/Y 条"
-                    all_data = self.store.get_raw_data()
-                    is_global = self.config.get("global_mode", False)
-                    # 筛选逻辑与随机抽取一致
-                    subset = [q for q in all_data if (str(q.get("group"))==group_id or is_global) and str(q.get("qq"))==quote.qq]
-                    
-                    # 找到当前这条语录的索引
-                    idx = 1
-                    for i, q in enumerate(subset):
-                        if q.get("id") == quote.id:
-                            idx = i + 1
-                            break
-                    
-                    html, opts = QuoteRenderer.render_single_card(quote, idx, len(subset))
-                    img = await self.html_render(html, {}, options=opts)
-                    yield event.image_result(img)
-                
-                # 如果有多条，展示合集卡片
-                else:
-                    bot_qq = self._get_self_id(event) or "10000"
-                    html, opts = QuoteRenderer.render_merged_card(saved_quotes, bot_qq, "智能金句挖掘", True)
-                    img = await self.html_render(html, {}, options=opts)
-                    yield event.image_result(img)
+                # --- 修改部分：统一使用 render_merged_card ---
+                bot_qq = self._get_self_id(event) or "10000"
+                # 即使只有1条，也使用 "智能金句挖掘" 这个标题的合集模板
+                html, opts = QuoteRenderer.render_merged_card(saved_quotes, bot_qq, "智能金句挖掘", True)
+                img = await self.html_render(html, {}, options=opts)
+                yield event.image_result(img)
+                # ----------------------------------------
 
         except Exception as e:
-            logger.error(f"AI Analysis Error: {e}")
-            yield event.plain_result(f"分析失败：{str(e)}")
+            # 捕获 Provider 抛出的异常
+            err_str = str(e)
+            if "ChatCompletion" in err_str and "content=None" in err_str:
+                 yield event.plain_result("🚫 挖掘失败：AI 拒绝生成内容。这通常是因为聊天记录中包含触发 Gemini 安全过滤器的敏感词。")
+            else:
+                logger.error(f"AI Analysis Error: {e}")
+                yield event.plain_result(f"分析失败：{err_str}")
 
-    # ================= 4. 核心工具方法 =================
+    # ================= 4. 历史消息抓取 (移植版) =================
 
-    def _force_find_provider(self, target_id: str):
-        if not target_id: return None
-        target_id_lower = target_id.lower()
+    async def _fetch_next_batch_robust(self, client, group_id, cursor_seq, error_strike_ref):
+        """[底层] 获取单批次消息 (防1200错误 + 指数跳跃 + 动态Batch + 熔断机制)"""
+        batch_size = 100 # 固定单次拉取数量
+        MAX_RETRY_STRIKE = 15 
         
-        all_providers = []
-        if hasattr(self.context, "register"):
-            reg_providers = getattr(self.context.register, "providers", None)
-            if isinstance(reg_providers, dict):
-                all_providers.extend(reg_providers.values())
-            elif isinstance(reg_providers, list):
-                all_providers.extend(reg_providers)
-        
-        if hasattr(self.context, "get_all_providers"):
-            try:
-                all_providers.extend(self.context.get_all_providers())
-            except Exception: pass
+        # 熔断检查
+        if error_strike_ref[0] > MAX_RETRY_STRIKE:
+            logger.error(f"QuoteCore: 连续失败次数过多 ({error_strike_ref[0]}次)，触发熔断停止回溯。")
+            return [], 0, False 
 
-        seen = set()
-        for p in all_providers:
-            if not p or id(p) in seen: continue
-            seen.add(id(p))
+        try:
+            payload = {
+                "group_id": int(group_id),
+                "count": batch_size,
+                "reverseOrder": True # 关键：倒序拉取
+            }
+            if cursor_seq > 0:
+                payload["message_seq"] = cursor_seq
+
+            res = await client.api.call_action("get_group_msg_history", **payload)
             
-            p_ids = []
-            if hasattr(p, "id") and p.id: p_ids.append(str(p.id))
-            if hasattr(p, "provider_id") and p.provider_id: p_ids.append(str(p.provider_id))
-            if hasattr(p, "config") and isinstance(p.config, dict) and p.config.get("id"): 
-                p_ids.append(str(p.config["id"]))
-            if hasattr(p, "provider_config") and isinstance(p.provider_config, dict) and p.provider_config.get("id"): 
-                p_ids.append(str(p.provider_config["id"]))
+            if not res or not isinstance(res, dict): return [], 0, False
+            batch = res.get("messages", [])
+            if not batch: return [], 0, True 
+            
+            # 获取当前批次最老的消息ID，作为下次的游标
+            oldest_msg = batch[0]
+            next_cursor = int(oldest_msg.get("message_seq") or oldest_msg.get("message_id") or 0)
+            
+            if error_strike_ref[0] > 0:
+                error_strike_ref[0] = 0
+                
+            return batch, next_cursor, True
 
-            for pid in p_ids:
-                if pid.lower() == target_id_lower:
-                    return p
-        return None
+        except Exception as e:
+            err_msg = str(e)
+            
+            if "1200" in err_msg or "不存在" in err_msg:
+                error_strike_ref[0] += 1
+                current_strike = error_strike_ref[0]
+                
+                base_jump = 50 
+                # 指数跳跃：50, 100, 200...
+                jump_step = base_jump * (2 ** (min(current_strike, 8) - 1))
+                new_cursor = cursor_seq - jump_step
+                return [], new_cursor, False 
+            else:
+                return [], 0, False
 
-    async def _fetch_group_history_from_server(self, event: AstrMessageEvent, group_id: str, count: int = 20) -> List[Dict]:
-        """
-        [v1.9.2] 智能跳跃翻页
-        """
+    async def _fetch_history_robust_main(self, event: AstrMessageEvent, group_id: str, total_count: int) -> List[Dict]:
+        """[上层] 鲁棒性历史消息拉取主循环"""
         if event.get_platform_name() != "aiocqhttp": 
             return []
         
         client = event.bot
         collected_messages = []
-        seen_ids = set()
-        
         cursor_seq = 0
-        max_loops = int(count / 20) + 15
+        error_strike = [0] 
         
-        # 仅在调试模式下打印详细进度
-        debug_mode = self.config.get("debug_mode", False)
-        if debug_mode:
-            logger.info(f"📚 [History] 准备拉取群 {group_id} 的最近 {count} 条消息...")
-
-        # 连续错误计数器
-        error_strike = 0
-
-        for i in range(max_loops):
-            if len(collected_messages) >= count:
-                break
+        # 估算循环次数，防止无限循环
+        max_loops = int(total_count / 50) + 20 
+        loops = 0
+        
+        while len(collected_messages) < total_count and loops < max_loops:
+            loops += 1
+            batch, next_cursor, success = await self._fetch_next_batch_robust(
+                client, group_id, cursor_seq, error_strike
+            )
             
-            req_count = min(100, count - len(collected_messages))
-            req_count = max(20, req_count)
-
-            try:
-                res = await client.api.call_action(
-                    "get_group_msg_history", 
-                    group_id=int(group_id), 
-                    message_seq=cursor_seq,
-                    count=req_count
-                )
-                
-                # 重置错误计数
-                error_strike = 0
-                
-                if not res or not isinstance(res, dict):
-                    break
-                
-                batch = res.get("messages", [])
-                if not batch:
-                    if debug_mode: logger.info("✅ [History] 消息记录已达尽头。")
-                    break
-                
-                # 寻找最小 Seq (用于下一次请求)
-                current_min_val = None
-                
-                # 尝试提取
-                first_msg = batch[0]
-                try:
-                    val = int(first_msg.get("message_seq") or first_msg.get("message_id") or 0)
-                    if val > 0:
-                        current_min_val = val
-                except: pass
-
-                # 收集数据
-                valid_batch_count = 0
-                for msg in reversed(batch): 
-                    mid = msg.get("message_id")
-                    if mid and mid not in seen_ids:
-                        seen_ids.add(mid)
-                        collected_messages.append(msg)
-                        valid_batch_count += 1
-                
-                # 计算下一次游标 (优先 -1，如果没取到 min_val 则不更新)
-                next_cursor = 0
-                if current_min_val:
-                    next_cursor = current_min_val - 1
-                
-                if debug_mode:
-                    logger.info(f"📥 [History] 第 {i+1} 次: 获取 {len(batch)} 条, 新增 {valid_batch_count}. 下次游标: {next_cursor}")
-
-                # 停止条件
-                if valid_batch_count == 0:
-                    break
-                
-                if next_cursor <= 0:
-                    break
-                    
-                if cursor_seq != 0 and next_cursor >= cursor_seq:
-                    # 游标没变小，可能是 seq 不支持，强制 -20 尝试跳出
-                    next_cursor = cursor_seq - 20
-                    if next_cursor <= 0: break
-                    
+            if not success:
+                # 游标归零或熔断
+                if next_cursor <= 0: break
                 cursor_seq = next_cursor
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
+                continue
+            
+            if not batch: break
+            
+            for msg in batch:
+                collected_messages.append(msg)
 
-            except Exception as e:
-                # [Fix] 捕获所有异常，包括 ActionFailed
-                err_msg = str(e)
-                # 检查是否是 '消息不存在' 错误 (retcode 1200)
-                if "1200" in err_msg or "不存在" in err_msg:
-                    error_strike += 1
-                    # 动态跳跃步长：错误次数越多，跳得越远
-                    step = 20 * error_strike
-                    if debug_mode:
-                        logger.warning(f"⚠️ [History] 游标 {cursor_seq} 指向的消息不存在，尝试向前跳跃 {step} 条重试...")
-                    
-                    if cursor_seq > step:
-                        cursor_seq -= step
-                        continue # 继续下一次循环，不退出
-                    else:
-                        if debug_mode: logger.error("❌ [History] 游标归零，无法继续向前。")
-                        break
-                else:
-                    if debug_mode: logger.warning(f"❌ [History] 拉取中断: {e}")
-                    break
+            cursor_seq = next_cursor
+            await asyncio.sleep(0.2)
         
-        collected_messages.sort(key=lambda x: x.get("time", 0))
-        return collected_messages[-count:]
+        # 去重
+        unique_msgs = {str(m.get("message_id")): m for m in collected_messages}.values()
+        sorted_msgs = sorted(unique_msgs, key=lambda x: x.get("time", 0))
+        
+        return sorted_msgs[-total_count:]
 
-    async def _save_quote_core(self, event: AstrMessageEvent, text: str, sender_info: dict, group_id: str) -> Union[Quote, str, None]:
+    # ================= 5. 其他工具方法 =================
+
+    def _force_find_provider(self, target_id: str):
+        if not target_id: return None
+        target_id_lower = target_id.lower()
+        all_providers = []
+        if hasattr(self.context, "register"):
+            reg_providers = getattr(self.context.register, "providers", None)
+            if isinstance(reg_providers, dict): all_providers.extend(reg_providers.values())
+            elif isinstance(reg_providers, list): all_providers.extend(reg_providers)
+        if hasattr(self.context, "get_all_providers"):
+            try: all_providers.extend(self.context.get_all_providers())
+            except Exception: pass
+        seen = set()
+        for p in all_providers:
+            if not p or id(p) in seen: continue
+            seen.add(id(p))
+            p_ids = []
+            if hasattr(p, "id") and p.id: p_ids.append(str(p.id))
+            if hasattr(p, "provider_id") and p.provider_id: p_ids.append(str(p.provider_id))
+            if hasattr(p, "config") and isinstance(p.config, dict) and p.config.get("id"): p_ids.append(str(p.config["id"]))
+            if hasattr(p, "provider_config") and isinstance(p.provider_config, dict) and p.provider_config.get("id"): p_ids.append(str(p.provider_config["id"]))
+            for pid in p_ids:
+                if pid.lower() == target_id_lower: return p
+        return None
+
+    async def _save_quote_core(self, event: AstrMessageEvent, text: str, sender_info: dict, group_id: str, origin_time: Optional[int] = None) -> Union[Quote, str, None]:
         target_qq = str(sender_info.get("user_id") or sender_info.get("qq") or "")
         target_name = (sender_info.get("card") or sender_info.get("nickname") or target_qq).strip()
         clean_text = text.strip()
-
         if not clean_text or not target_qq: return None
-
         self_id = self._get_self_id(event)
-        if self_id and target_qq == self_id:
-            return "IS_BOT"
-
-        if self.store.check_exists(group_id, clean_text):
-            return "DUPLICATE"
-
+        if self_id and target_qq == self_id: return "IS_BOT"
+        if self.store.check_exists(group_id, clean_text): return "DUPLICATE"
+        
+        created_at_ts = float(origin_time) if origin_time else time.time()
         qid = secrets.token_hex(4)
         quote = Quote(
             id=qid, qq=str(target_qq), name=str(target_name), 
             text=clean_text, created_by=event.get_sender_id(),
-            created_at=time.time(), group=str(group_id)
+            created_at=created_at_ts, group=str(group_id)
         )
         await self.store.add_quote(quote)
         return quote
@@ -519,7 +474,8 @@ class QuotesPlugin(Star):
             lname = await self._get_current_name(event, current_group_id, target_qq)
             dname = lname if lname else sel[0].name
             if lname: 
-                for q in sel: q.name = lname
+                for q in sel: 
+                    q.name = lname
             html, opts = QuoteRenderer.render_merged_card(sel, target_qq, dname, False)
             img = await self.html_render(html, {}, options=opts)
             yield event.image_result(img); return
@@ -555,20 +511,15 @@ class QuotesPlugin(Star):
         group_id = str(event.get_group_id())
         now = time.time()
         if now - self._poke_cooldowns.get(group_id, 0) < cooldown: return
-        
         is_trigger = False
         poke_target = None
         for seg in event.message_obj.message:
             if isinstance(seg, Comp.Poke): poke_target = str(getattr(seg, "qq", "") or getattr(seg, "target", "") or ""); break
-            
         if mode_str == "任意戳": is_trigger = True
         elif str(poke_target) == str(self._get_self_id(event)): is_trigger = True
-            
         if is_trigger:
             self._poke_cooldowns[group_id] = now
             async for res in self._logic_random(event): yield res
-
-    # ================= 5. 底层工具 (保持不变) =================
     
     async def _refresh_quote_name(self, event, group_id, quote):
         try:
