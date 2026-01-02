@@ -5,31 +5,26 @@
     "_special": "select_provider",
     "hint": "指定用于金句挖掘的特定模型，留空则使用当前会话默认的模型"
   },
-  "debug_mode": {
-    "description": "调试模式",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后会在控制台输出 AI 的原始响应内容，方便排查问题（如 AI 幻觉、格式错误等）"
+  "user_blacklist": {
+    "description": "AI分析黑名单",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [],
+    "hint": "填入QQ号。这些用户的发言将被 AI 自动忽略，不会被挖掘为金句。"
   },
   "max_history_count": {
     "description": "AI分析回溯消息条数",
     "type": "int",
-    "default": 200,
-    "hint": "单次分析获取的历史消息数量，建议 50-200"
+    "default": 500,
+    "hint": "单次分析获取的历史消息数量"
   },
   "max_golden_quotes": {
     "description": "单次挖掘金句数量",
     "type": "int",
     "default": 1,
-    "hint": "希望 AI 挑选出的金句数量，将填充到提示词的 {max_golden_quotes} 变量中"
-  },
-  "analysis_prompt": {
-    "description": "AI分析提示词模板",
-    "type": "text",
-    "editor_mode": true,
-    "editor_language": "markdown",
-    "default": "请你扮演一位眼光极高、品味毒辣的“互联网语录史官”，用最苛刻的标准审视以下群聊记录，尝试挖掘 **{max_golden_quotes}** 句足以载入群史的“传世经典”。\n\n## 🛑 熔断机制 (最重要的规则)\n**宁缺毋滥！宁缺毋滥！宁缺毋滥！**\n如果最近的聊天记录都很平淡、无聊、琐碎，或者只是普通的搞笑，**请不要勉强收录**。\n在这种情况下，请直接在返回的 content 字段中填入 \"NULL\"。**我宁愿要一个空的 NULL，也不要一句平庸的废话。**\n\n## 💎 收录门槛 (必须满足至少一条)\n1. **逻辑奇点**：具备极强的荒谬感，用一本正经的语气说出完全违背常识的暴论。\n2. **回旋镖/神回复**：对前文进行了降维打击式的吐槽，角度极其刁钻，让人无法反驳。\n3. **抽象哲学**：看似胡言乱语，细品却充满了对于人类本质的解构，具备极强的反差张力。\n4. **极致的情绪宣泄**：极其炸裂的破防瞬间，或者极其逆天的发情/发癫言论（需具备原创性）。\n\n## 🗑️ 垃圾分类 (绝对不选)\n- ❌ **日常寒暄**：“早安”、“吃了吗”、“睡了”。\n- ❌ **低级复读**：“笑死”、“666”、“确实”、“+1”。\n- ❌ **功能性发言**：询问配置、报错信息、Bot 指令（如 /help）。\n- ❌ **烂梗堆砌**：完全照搬网络热门段子，没有原创加工的内容。\n\n## 聊天记录上下文：\n{context}\n\n## 输出格式\n请仅返回一个纯 JSON **数组**。不要包含任何 Markdown 代码块标记（如 ```json）。\n示例：\n[\n  {{\n    \"content\": \"这里填原文 (若无合适金句，请务必填 NULL)\",\n    \"reason\": \"这里填入选理由 (若content为NULL，这里留空)\"\n  }}\n]",
-    "hint": "必须包含 {context} 和 {max_golden_quotes} 占位符。JSON示例中的大括号请使用双大括号 {{ }} 进行转义。"
+    "hint": "希望 AI 挑选出的金句数量"
   },
   "poke_mode": {
     "description": "戳一戳响应模式",
@@ -49,7 +44,7 @@
   },
   "ignore_prefix": {
     "description": "是否忽略指令前缀",
-    "hint": "开启后直接发送 '语录'、'上传' 即可触发，无需前缀)",
+    "hint": "开启后直接发送 '语录'、'上传' 即可触发",
     "type": "bool",
     "default": false
   },
