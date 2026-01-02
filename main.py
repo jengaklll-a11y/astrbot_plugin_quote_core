@@ -6,27 +6,22 @@ import random
 import re
 import asyncio
 import json
-from collections import deque
 from pathlib import Path
 from typing import Dict, Optional, Any, List, Union
-
-# 引入定时任务相关模块
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 
-# 导入分层模块 (请确保同目录下有 model.py, dao.py, renderer.py)
+# 导入分层模块
 from .model import Quote
 from .dao import QuoteStore
 from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "astrbot_plugin_quote_core"
 
-@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core)", "2.0.0", "支持多群隔离/混合、HTML卡片渲染和长图生成、一键捕捉上传的语录插件")
+@register("astrbot_plugin_quote_core", "jengaklll-a11y", "语录(Core) Pro", "1.9.5", "新增：卡片联动与调试开关")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
         super().__init__(context)
@@ -37,13 +32,6 @@ class QuotesPlugin(Star):
         
         self._last_sent_qid: Dict[str, str] = {}
         self._poke_cooldowns: Dict[str, float] = {}
-        
-        # 消息ID去重队列
-        self._processed_msg_ids = deque(maxlen=50)
-
-        # 初始化调度器
-        self.scheduler = AsyncIOScheduler()
-        self._setup_scheduler()
 
         # 正则路由
         self.regex_routes = [
@@ -52,23 +40,6 @@ class QuotesPlugin(Star):
             (re.compile(r"^删除$|^删除语录$"), self._logic_delete),
             (re.compile(r"^一键金句$|^智能收录$"), self._logic_ai_analysis)
         ]
-    
-    def _setup_scheduler(self):
-        """配置并启动定时任务"""
-        # [修改] 直接读取间隔时间，如果大于 0 则启动
-        interval_hours = int(self.config.get("auto_ai_interval", 0))
-        
-        if interval_hours > 0:
-            try:
-                # 使用 IntervalTrigger，单位小时
-                trigger = IntervalTrigger(hours=interval_hours)
-                self.scheduler.add_job(self._auto_ai_task_entry, trigger)
-                self.scheduler.start()
-                logger.info(f"[{PLUGIN_NAME}] 自动金句挖掘任务已启动，每 {interval_hours} 小时执行一次")
-            except Exception as e:
-                logger.error(f"[{PLUGIN_NAME}] 定时任务启动失败: {e}")
-        else:
-            logger.info(f"[{PLUGIN_NAME}] 自动金句挖掘任务已关闭 (间隔设为0)")
 
     # ================= 1. 指令注册 =================
     
@@ -90,10 +61,6 @@ class QuotesPlugin(Star):
     @filter.command("一键金句", aliases=["智能收录"])
     async def cmd_ai_add(self, event: AstrMessageEvent):
         """[AI] 拉取历史消息并挖掘金句"""
-        # 检查主功能开关
-        if not self.config.get("enable_ai_analysis", True):
-            yield event.plain_result("❌ 该功能已被管理员关闭。")
-            return
         async for res in self._logic_ai_analysis(event): yield res
 
     # ================= 2. 辅助监听 =================
@@ -123,24 +90,8 @@ class QuotesPlugin(Star):
 
     # ================= 3. 核心业务逻辑 =================
 
-    def _check_duplicate(self, event: AstrMessageEvent) -> bool:
-        """检查消息是否已处理 (防抖)"""
-        try:
-            mid = getattr(event.message_obj, "message_id", None)
-            if not mid and hasattr(event, "raw_event"):
-                mid = event.raw_event.get("message_id")
-            if mid:
-                mid_str = str(mid)
-                if mid_str in self._processed_msg_ids:
-                    return True
-                self._processed_msg_ids.append(mid_str)
-        except: pass
-        return False
-
     async def _logic_add(self, event: AstrMessageEvent):
         """逻辑：手动上传"""
-        if self._check_duplicate(event): return
-
         reply_msg_id = self._get_reply_message_id(event)
         if not reply_msg_id:
             yield event.plain_result("请回复某条消息发送 /上传 以收录语录。")
@@ -154,20 +105,18 @@ class QuotesPlugin(Star):
             res = await self._save_quote_core(event, target_text, sender, str(event.get_group_id()))
             
             if res == "IS_BOT":
-                yield event.plain_result("无法收录：不可以收录机器人发送的消息哦。")
+                yield event.plain_result("⚠️ 无法收录：不可以收录机器人发送的消息哦。")
             elif res == "DUPLICATE":
-                yield event.plain_result("收录取消：该语录已存在库中。")
+                yield event.plain_result("⚠️ 收录取消：该语录已存在库中。")
             elif res:
                 yield event.plain_result(f"已收录 {res.name} 的语录")
             else:
                 yield event.plain_result("收录失败：未知错误。")
         else:
-            yield event.plain_result("收录失败：无法收录非文本内容。")
+            yield event.plain_result("收录失败：无法获取内容或发送者信息。")
 
     async def _logic_ai_analysis(self, event: AstrMessageEvent):
-        """逻辑：AI 分析 (指令触发)"""
-        if self._check_duplicate(event): return
-        
+        """逻辑：AI 分析"""
         group_id = str(event.get_group_id())
         self_id = self._get_self_id(event)
         
@@ -195,8 +144,8 @@ class QuotesPlugin(Star):
         
         yield event.plain_result(f"[{model_name}] 正在深挖最近 {max_history} 条消息...")
         
-        # 传入 event.bot (Client)
-        history_msgs = await self._fetch_group_history_from_server(event.bot, group_id, count=max_history)
+        # 调用移植自画像插件的抓取逻辑
+        history_msgs = await self._fetch_group_history_from_server(event, group_id, count=max_history)
         
         if len(history_msgs) < 5:
             yield event.plain_result("❌ 拉取到的历史消息过少，无法分析。")
@@ -216,20 +165,43 @@ class QuotesPlugin(Star):
             text = self._extract_plaintext_from_onebot_message(raw_msg)
             if not text or len(text) < 2: continue
             
+            if self.store.check_exists(group_id, text): continue
+
             name = sender.get("card") or sender.get("nickname") or "未知"
             valid_msgs_map[text] = m
             msgs_text.append(f"[{name}]: {text}")
         
         if not msgs_text:
-            yield event.plain_result("最近的消息似乎都是机器人发的，或者获取失败了。")
+            yield event.plain_result("最近的消息要么是机器人发的，要么已经被收录过啦！")
             return
 
         context_str = "\n".join(msgs_text)
         
         # 4. 获取 Prompt
-        prompt_tmpl = self.config.get("analysis_prompt", "")
-        if not prompt_tmpl:
-             prompt_tmpl = "请从以下记录中挑选 {max_golden_quotes} 条金句。\nChat Context:\n{context}\n请返回纯JSON数组：[{{\"content\": \"...\", \"reason\": \"...\"}}]"
+        default_prompt_lines = [
+            "请作为一名眼光极高的“金句鉴赏家”，从以下群聊记录中挑选出 **{max_golden_quotes}** 句最具备“金句”潜质的发言。",
+            "",
+            "## 判定标准（宁缺毋滥）：",
+            "1. **核心标准**：**逆天的神人发言**。必须具备颠覆常识的脑洞、逻辑跳脱的表达、强烈反差感或极致的抽象。",
+            "2. **典型特征**：包含争议话题元素、夸张类比、反常规结论、一本正经的「胡说八道」或突破语境的清奇思路。",
+            "3. **拒绝平庸**：**绝对不要选**普通的日常对话、单纯的玩梗复读、水群废话（如“早安”、“哈哈哈”）。",
+            "",
+            "## 聊天记录：",
+            "{context}",
+            "",
+            "## 返回格式：",
+            "请仅返回一个纯 JSON **数组**（Array），不要包含 Markdown 标记。",
+            "**重要：**如果聊天记录中没有符合标准的金句，该项的 content 请填 \"NULL\"。",
+            "[",
+            "  {",
+            "    \"content\": \"金句原文(如果没有满意的请填 NULL)\",",
+            "    \"reason\": \"入选理由\"",
+            "  }",
+            "]"
+        ]
+        default_prompt = "\n".join(default_prompt_lines)
+        
+        prompt_tmpl = self.config.get("analysis_prompt", default_prompt)
         
         if "{context}" not in prompt_tmpl: prompt_tmpl += "\n\nChat Context:\n{context}"
 
@@ -245,17 +217,13 @@ class QuotesPlugin(Star):
             resp = await provider.text_chat(prompt, session_id=None)
             llm_text = resp.completion_text.strip()
             
+            # [Update] 仅在调试模式开启时打印日志
             if self.config.get("debug_mode", False):
                 logger.info(f"[DEBUG] AI 金句分析原始返回: {llm_text}") 
             
             if llm_text.startswith("```json"): llm_text = llm_text[7:]
             if llm_text.endswith("```"): llm_text = llm_text[:-3]
-            
-            try:
-                raw_data = json.loads(llm_text.strip())
-            except json.JSONDecodeError:
-                yield event.plain_result("❌ AI 返回的数据格式有误，解析失败。")
-                return
+            raw_data = json.loads(llm_text.strip())
             
             data_list = []
             if isinstance(raw_data, list):
@@ -271,7 +239,7 @@ class QuotesPlugin(Star):
             
             for item in data_list:
                 content = item.get("content", "").strip()
-                reason = item.get("reason", "").strip()
+                reason = item.get("reason", "")
                 
                 if not content or content.upper() == "NULL" or content == "无":
                     continue
@@ -288,211 +256,80 @@ class QuotesPlugin(Star):
                 
                 if matched_msg:
                     sender = matched_msg.get("sender", {})
-                    # 尝试保存
                     res = await self._save_quote_core(event, content, sender, group_id)
                     
                     if isinstance(res, Quote):
-                        res.ai_reason = reason 
                         saved_quotes.append(res)
+                        # 如果需要查看理由，可以在这里 log 一下
                         logger.info(f"挖掘成功: {content} (理由: {reason})")
                     elif res == "DUPLICATE":
-                         sender_qq = str(sender.get("user_id") or "")
-                         sender_name = str(sender.get("card") or sender.get("nickname") or "")
-                         temp_quote = Quote(
-                             id="temp", qq=sender_qq, name=sender_name, 
-                             text=content, created_by="ai", created_at=time.time(), group=group_id
-                         )
-                         temp_quote.ai_reason = reason + " (已收录)"
-                         saved_quotes.append(temp_quote)
+                         # 可选：提示重复
+                         # yield event.plain_result(f"⚠️ AI 推荐了：{content} (已存在，跳过)")
+                         pass
                 else:
                     if self.config.get("debug_mode", False):
                         logger.debug(f"AI 幻觉: 无法在记录中找到 '{content}'")
 
-            # 6. 结果展示
+            # 6. 结果展示 (卡片联动)
             if not saved_quotes:
+                # 只有当全部都是 NULL，或者全部都找不到原文时才提示
                 if any(x.get("content", "").upper() != "NULL" for x in data_list):
-                    yield event.plain_result("🤔 AI 推荐了一些内容，但我没在记录里找到原文，无法生成卡片。")
+                    yield event.plain_result("🤔 AI 推荐了一些内容，但它们要么是重复的，要么我没在记录里找到原文。")
                 else:
                     yield event.plain_result("🤔 AI 翻阅了聊天记录，觉得最近大家聊得比较平淡，没有发现值得收录的金句。")
             else:
                 yield event.plain_result(f"🎉 成功挖掘 {len(saved_quotes)} 条金句！正在生成语录卡片...")
                 
-                bot_qq = self._get_self_id(event) or "10000"
-                html, opts = QuoteRenderer.render_merged_card(saved_quotes, bot_qq, "智能金句挖掘", True)
-                img = await self.html_render(html, {}, options=opts)
-                yield event.image_result(img)
+                # 如果只有1条，展示单人详细卡片
+                if len(saved_quotes) == 1:
+                    quote = saved_quotes[0]
+                    
+                    # 获取该用户在当前群的总语录数，用于显示 "第 X/Y 条"
+                    all_data = self.store.get_raw_data()
+                    is_global = self.config.get("global_mode", False)
+                    # 筛选逻辑与随机抽取一致
+                    subset = [q for q in all_data if (str(q.get("group"))==group_id or is_global) and str(q.get("qq"))==quote.qq]
+                    
+                    # 找到当前这条语录的索引
+                    idx = 1
+                    for i, q in enumerate(subset):
+                        if q.get("id") == quote.id:
+                            idx = i + 1
+                            break
+                    
+                    html, opts = QuoteRenderer.render_single_card(quote, idx, len(subset))
+                    img = await self.html_render(html, {}, options=opts)
+                    yield event.image_result(img)
+                
+                # 如果有多条，展示合集卡片
+                else:
+                    bot_qq = self._get_self_id(event) or "10000"
+                    html, opts = QuoteRenderer.render_merged_card(saved_quotes, bot_qq, "智能金句挖掘", True)
+                    img = await self.html_render(html, {}, options=opts)
+                    yield event.image_result(img)
 
         except Exception as e:
             logger.error(f"AI Analysis Error: {e}")
             yield event.plain_result(f"分析失败：{str(e)}")
 
-    # ================= 4. 定时任务逻辑 =================
-    
-    async def _auto_ai_task_entry(self):
-        """定时任务入口"""
-        # [修改] 再次检查间隔，如果为0则不执行（安全网）
-        interval_hours = int(self.config.get("auto_ai_interval", 0))
-        if interval_hours <= 0:
-            return
-        
-        target_groups = self.config.get("auto_ai_groups", [])
-        if not target_groups:
-            logger.warning(f"[{PLUGIN_NAME}] 自动金句任务触发，但未配置 auto_ai_groups (目标群号)。")
-            return
-            
-        logger.info(f"[{PLUGIN_NAME}] 开始执行自动金句挖掘，目标群数: {len(target_groups)}")
-        
-        # 查找可用的 Bot 实例 (OneBot V11)
-        bots = []
-        if hasattr(self.context, "register") and hasattr(self.context.register, "get_bots"):
-             bots = self.context.register.get_bots()
-        
-        if not bots:
-            logger.error(f"[{PLUGIN_NAME}] 自动任务失败：未找到已连接的 Bot 实例。")
-            return
-            
-        for group_id in target_groups:
-            group_id = str(group_id).strip()
-            if not group_id: continue
-            
-            # 简单策略：使用第一个能用的 Bot。
-            client = bots[0] 
-            
-            try:
-                await self._run_auto_analysis_core(client, group_id)
-                await asyncio.sleep(5) # 群与群之间间隔，防止风控
-            except Exception as e:
-                logger.error(f"[{PLUGIN_NAME}] 群 {group_id} 自动挖掘出错: {e}")
-
-    async def _run_auto_analysis_core(self, client, group_id: str):
-        """定时任务核心逻辑 (无 event 对象)"""
-        # 1. 查找 LLM
-        cfg_provider_id = self.config.get("llm_provider_id")
-        provider = self._force_find_provider(cfg_provider_id)
-        
-        # 如果未指定，尝试获取第一个可用 Provider
-        if not provider:
-            all_providers = self._get_all_providers_safe()
-            if all_providers: provider = all_providers[0]
-            
-        if not provider:
-            logger.warning(f"[{PLUGIN_NAME}] 自动挖掘跳过：无法找到可用的 LLM Provider。")
-            return
-
-        # 2. 拉取历史
-        max_history = max(50, self.config.get("max_history_count", 200))
-        max_quotes = max(1, self.config.get("max_golden_quotes", 1)) 
-        
-        history_msgs = await self._fetch_group_history_from_server(client, group_id, count=max_history)
-        if len(history_msgs) < 5: return
-
-        # 3. 构造 Context
-        self_id = str(getattr(client, "self_id", "10000"))
-        msgs_text = []
-        valid_msgs_map = {} 
-
-        for m in history_msgs:
-            sender = m.get("sender", {})
-            sender_id = str(sender.get("user_id", ""))
-            if self_id and sender_id == self_id: continue
-            raw_msg = m.get("message", [])
-            text = self._extract_plaintext_from_onebot_message(raw_msg)
-            if not text or len(text) < 2: continue
-            
-            name = sender.get("card") or sender.get("nickname") or "未知"
-            valid_msgs_map[text] = m
-            msgs_text.append(f"[{name}]: {text}")
-        
-        if not msgs_text: return
-        context_str = "\n".join(msgs_text)
-        
-        # 4. Prompt & LLM
-        prompt_tmpl = self.config.get("analysis_prompt", "")
-        if not prompt_tmpl: prompt_tmpl = "请从以下记录中挑选 {max_golden_quotes} 条金句。\nChat Context:\n{context}\n请返回纯JSON数组：[{{\"content\": \"...\", \"reason\": \"...\"}}]"
-        if "{context}" not in prompt_tmpl: prompt_tmpl += "\n\nChat Context:\n{context}"
-        
-        prompt = prompt_tmpl.format(context=context_str, max_golden_quotes=max_quotes)
-        
-        resp = await provider.text_chat(prompt, session_id=None)
-        llm_text = resp.completion_text.strip()
-        if llm_text.startswith("```json"): llm_text = llm_text[7:]
-        if llm_text.endswith("```"): llm_text = llm_text[:-3]
-        
-        try:
-            raw_data = json.loads(llm_text.strip())
-        except: return 
-        
-        data_list = raw_data if isinstance(raw_data, list) else [raw_data]
-        saved_quotes = []
-        
-        for item in data_list:
-            content = item.get("content", "").strip()
-            reason = item.get("reason", "").strip()
-            if not content or content.upper() == "NULL" or content == "无": continue
-
-            matched_msg = None
-            if content in valid_msgs_map:
-                matched_msg = valid_msgs_map[content]
-            else:
-                for k, v in valid_msgs_map.items():
-                    if content in k or k in content:
-                        matched_msg = v; content = k; break
-            
-            if matched_msg:
-                sender = matched_msg.get("sender", {})
-                target_qq = str(sender.get("user_id") or "")
-                target_name = (sender.get("card") or sender.get("nickname") or target_qq).strip()
-                
-                if self.store.check_exists(group_id, content):
-                    # 已存在，创建临时对象展示
-                    temp_quote = Quote(id="temp", qq=target_qq, name=target_name, text=content, created_by="ai_auto", created_at=time.time(), group=group_id)
-                    temp_quote.ai_reason = reason + " (已收录)"
-                    saved_quotes.append(temp_quote)
-                else:
-                    # 新增
-                    qid = secrets.token_hex(4)
-                    new_quote = Quote(
-                        id=qid, qq=target_qq, name=target_name, 
-                        text=content, created_by="ai_auto",
-                        created_at=time.time(), group=group_id
-                    )
-                    await self.store.add_quote(new_quote)
-                    new_quote.ai_reason = reason
-                    saved_quotes.append(new_quote)
-                    logger.info(f"[{PLUGIN_NAME}] 自动挖掘成功[{group_id}]: {content}")
-
-        # 5. 发送结果
-        if saved_quotes:
-            html, opts = QuoteRenderer.render_merged_card(saved_quotes, self_id, "自动金句挖掘", True)
-            img_bytes = await self.html_render(html, {}, options=opts)
-            
-            # 主动发送消息
-            payload = {
-                "group_id": int(group_id),
-                "message": [
-                    {"type": "text", "data": {"text": f"Running... 已完成今日自动挖掘，发现 {len(saved_quotes)} 条金句！"}},
-                    {"type": "image", "data": {"file": f"base64://{img_bytes}"}}
-                ]
-            }
-            await client.api.call_action("send_group_msg", **payload)
-
-    # ================= 5. 核心工具方法 =================
-
-    def _get_all_providers_safe(self):
-        """获取所有可用 Provider"""
-        all_providers = []
-        if hasattr(self.context, "register"):
-            reg_providers = getattr(self.context.register, "providers", None)
-            if isinstance(reg_providers, dict): all_providers.extend(reg_providers.values())
-            elif isinstance(reg_providers, list): all_providers.extend(reg_providers)
-        try: all_providers.extend(self.context.get_all_providers())
-        except: pass
-        return list(set(all_providers)) # dedup by object id roughly
+    # ================= 4. 核心工具方法 =================
 
     def _force_find_provider(self, target_id: str):
         if not target_id: return None
         target_id_lower = target_id.lower()
-        all_providers = self._get_all_providers_safe()
+        
+        all_providers = []
+        if hasattr(self.context, "register"):
+            reg_providers = getattr(self.context.register, "providers", None)
+            if isinstance(reg_providers, dict):
+                all_providers.extend(reg_providers.values())
+            elif isinstance(reg_providers, list):
+                all_providers.extend(reg_providers)
+        
+        if hasattr(self.context, "get_all_providers"):
+            try:
+                all_providers.extend(self.context.get_all_providers())
+            except Exception: pass
 
         seen = set()
         for p in all_providers:
@@ -512,21 +349,31 @@ class QuotesPlugin(Star):
                     return p
         return None
 
-    # 参数 event -> client
-    async def _fetch_group_history_from_server(self, client, group_id: str, count: int = 20) -> List[Dict]:
-        """拉取历史消息"""
-        if not hasattr(client, "api"): return []
+    async def _fetch_group_history_from_server(self, event: AstrMessageEvent, group_id: str, count: int = 20) -> List[Dict]:
+        """
+        [v1.9.2] 智能跳跃翻页
+        """
+        if event.get_platform_name() != "aiocqhttp": 
+            return []
         
+        client = event.bot
         collected_messages = []
         seen_ids = set()
         
         cursor_seq = 0
         max_loops = int(count / 20) + 15
         
+        # 仅在调试模式下打印详细进度
+        debug_mode = self.config.get("debug_mode", False)
+        if debug_mode:
+            logger.info(f"📚 [History] 准备拉取群 {group_id} 的最近 {count} 条消息...")
+
+        # 连续错误计数器
         error_strike = 0
 
         for i in range(max_loops):
-            if len(collected_messages) >= count: break
+            if len(collected_messages) >= count:
+                break
             
             req_count = min(100, count - len(collected_messages))
             req_count = max(20, req_count)
@@ -539,19 +386,29 @@ class QuotesPlugin(Star):
                     count=req_count
                 )
                 
+                # 重置错误计数
                 error_strike = 0
-                if not res or not isinstance(res, dict): break
+                
+                if not res or not isinstance(res, dict):
+                    break
                 
                 batch = res.get("messages", [])
-                if not batch: break
+                if not batch:
+                    if debug_mode: logger.info("✅ [History] 消息记录已达尽头。")
+                    break
                 
+                # 寻找最小 Seq (用于下一次请求)
                 current_min_val = None
+                
+                # 尝试提取
                 first_msg = batch[0]
                 try:
                     val = int(first_msg.get("message_seq") or first_msg.get("message_id") or 0)
-                    if val > 0: current_min_val = val
+                    if val > 0:
+                        current_min_val = val
                 except: pass
 
+                # 收集数据
                 valid_batch_count = 0
                 for msg in reversed(batch): 
                     mid = msg.get("message_id")
@@ -560,12 +417,23 @@ class QuotesPlugin(Star):
                         collected_messages.append(msg)
                         valid_batch_count += 1
                 
+                # 计算下一次游标 (优先 -1，如果没取到 min_val 则不更新)
                 next_cursor = 0
-                if current_min_val: next_cursor = current_min_val - 1
+                if current_min_val:
+                    next_cursor = current_min_val - 1
                 
-                if valid_batch_count == 0: break
-                if next_cursor <= 0: break
+                if debug_mode:
+                    logger.info(f"📥 [History] 第 {i+1} 次: 获取 {len(batch)} 条, 新增 {valid_batch_count}. 下次游标: {next_cursor}")
+
+                # 停止条件
+                if valid_batch_count == 0:
+                    break
+                
+                if next_cursor <= 0:
+                    break
+                    
                 if cursor_seq != 0 and next_cursor >= cursor_seq:
+                    # 游标没变小，可能是 seq 不支持，强制 -20 尝试跳出
                     next_cursor = cursor_seq - 20
                     if next_cursor <= 0: break
                     
@@ -573,15 +441,25 @@ class QuotesPlugin(Star):
                 await asyncio.sleep(0.5)
 
             except Exception as e:
+                # [Fix] 捕获所有异常，包括 ActionFailed
                 err_msg = str(e)
+                # 检查是否是 '消息不存在' 错误 (retcode 1200)
                 if "1200" in err_msg or "不存在" in err_msg:
                     error_strike += 1
+                    # 动态跳跃步长：错误次数越多，跳得越远
                     step = 20 * error_strike
+                    if debug_mode:
+                        logger.warning(f"⚠️ [History] 游标 {cursor_seq} 指向的消息不存在，尝试向前跳跃 {step} 条重试...")
+                    
                     if cursor_seq > step:
                         cursor_seq -= step
-                        continue 
-                    else: break
-                else: break
+                        continue # 继续下一次循环，不退出
+                    else:
+                        if debug_mode: logger.error("❌ [History] 游标归零，无法继续向前。")
+                        break
+                else:
+                    if debug_mode: logger.warning(f"❌ [History] 拉取中断: {e}")
+                    break
         
         collected_messages.sort(key=lambda x: x.get("time", 0))
         return collected_messages[-count:]
@@ -610,8 +488,6 @@ class QuotesPlugin(Star):
         return quote
 
     async def _logic_random(self, event: AstrMessageEvent):
-        if self._check_duplicate(event): return
-
         current_group_id = str(event.get_group_id())
         is_global = self.config.get("global_mode", False)
         search_group_id = None if is_global else current_group_id
@@ -662,8 +538,6 @@ class QuotesPlugin(Star):
         yield event.image_result(img)
 
     async def _logic_delete(self, event: AstrMessageEvent):
-        if self._check_duplicate(event): return
-
         if self.config.get("admin_only", False) and not event.is_admin():
             yield event.plain_result("仅管理员可删除。"); return
         group_id = str(event.get_group_id())
@@ -694,7 +568,7 @@ class QuotesPlugin(Star):
             self._poke_cooldowns[group_id] = now
             async for res in self._logic_random(event): yield res
 
-    # ================= 5. 底层工具 =================
+    # ================= 5. 底层工具 (保持不变) =================
     
     async def _refresh_quote_name(self, event, group_id, quote):
         try:
