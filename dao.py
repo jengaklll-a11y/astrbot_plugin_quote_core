@@ -2,6 +2,8 @@ import json
 import random
 import asyncio
 import dataclasses
+import os
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Set
 from .model import Quote
@@ -15,7 +17,7 @@ class QuoteStore:
         
         # 原始数据缓存
         self._cache: List[Dict[str, Any]] = self._load()
-        # [新增] O(1) 快速查重索引 (格式: "{group_id}_{text}")
+        # O(1) 快速查重索引 (格式: "{group_id}_{text}")
         self._index: Set[str] = set()
         self._rebuild_index()
 
@@ -38,9 +40,34 @@ class QuoteStore:
                 self._index.add(f"{gid}_{txt}")
 
     async def _save(self):
+        """
+        [安全增强] 原子写入：先写入临时文件，再重命名覆盖。
+        防止写入过程中断电导致数据文件损坏。
+        """
         async with self._lock:
             data = {"quotes": self._cache}
-            self.file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            json_str = json.dumps(data, ensure_ascii=False, indent=2)
+            
+            # 创建临时文件
+            fd, tmp_path = tempfile.mkstemp(
+                dir=self.data_dir, 
+                text=True, 
+                prefix="quotes_", 
+                suffix=".tmp"
+            )
+            
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(json_str)
+                
+                # 原子替换 (在 POSIX 系统上是原子的，Windows 上也比直接写安全)
+                tmp_path_obj = Path(tmp_path)
+                tmp_path_obj.replace(self.file)
+            except Exception as e:
+                # 如果出错，尝试清理临时文件
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                raise e
 
     def _safe_to_quote(self, data: Dict[str, Any]) -> Quote:
         """安全转换为 Quote 对象，自动忽略多余字段"""
@@ -105,7 +132,6 @@ class QuoteStore:
         return res
 
     async def delete_quote(self, qid: str) -> bool:
-        initial_len = len(self._cache)
         # 找到要删除的项以更新索引
         to_delete = next((q for q in self._cache if q.get("id") == qid), None)
         
