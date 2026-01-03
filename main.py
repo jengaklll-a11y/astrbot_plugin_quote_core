@@ -6,13 +6,14 @@ import random
 import re
 import asyncio
 import json
-import ast  # [New] 用于解析单引号格式的 JSON
+import ast
 from pathlib import Path
 from typing import Dict, Optional, Any, List, Union
 
 # AstrBot Imports
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
+from astrbot.api.star import StarTools  # [Fix] 引入 StarTools
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 
@@ -23,14 +24,15 @@ from .renderer import QuoteRenderer
 
 PLUGIN_NAME = "astrbot_plugin_quote_core"
 
-@register(PLUGIN_NAME, "jengaklll-a11y", "支持多群隔离/混合、HTML卡片渲染和长图生成、Ai一键捕捉上传", "2.0.5")
+@register(PLUGIN_NAME, "jengaklll-a11y", "支持多群隔离/混合、HTML卡片渲染和长图生成、Ai一键捕捉上传", "2.0.6")
 class QuotesPlugin(Star):
     def __init__(self, context: Context, config: Dict = None):
         super().__init__(context)
         self.config = config or {}
         
-        # 确保目录结构为 data/plugin_data/astrbot_plugin_quote_core
-        self.data_dir = Path("data/plugin_data") / PLUGIN_NAME
+        # [Fix] 使用 StarTools 获取标准数据目录，不再硬编码
+        # get_data_dir 返回的是 str，建议转为 Path 操作
+        self.data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
         self.store = QuoteStore(self.data_dir)
         
         self._last_sent_qid: Dict[str, str] = {}
@@ -106,6 +108,11 @@ class QuotesPlugin(Star):
 
     async def _logic_add(self, event: AstrMessageEvent):
         """逻辑：手动上传"""
+        # [Check] 平台检查：仅 OneBot 协议支持通过 API 获取回复消息原文
+        if event.get_platform_name() != "aiocqhttp":
+            yield event.plain_result("⚠️ 当前平台不支持获取历史消息原文，无法使用引用收录功能。")
+            return
+
         reply_msg_id = self._get_reply_message_id(event)
         if not reply_msg_id:
             yield event.plain_result("请回复某条消息发送 /上传 以收录语录。")
@@ -131,10 +138,14 @@ class QuotesPlugin(Star):
 
     async def _logic_ai_analysis(self, event: AstrMessageEvent):
         """逻辑：AI 分析"""
+        # [Check] 平台检查
+        if event.get_platform_name() != "aiocqhttp":
+            yield event.plain_result("⚠️ 智能挖掘功能依赖 OneBot 协议的历史消息接口，当前平台暂不支持。")
+            return
+
         group_id = str(event.get_group_id())
         self_id = self._get_self_id(event)
         
-        # 获取黑名单
         blacklist = self.config.get("user_blacklist", [])
         if not isinstance(blacklist, list):
             blacklist = []
@@ -177,11 +188,9 @@ class QuotesPlugin(Star):
             sender = m.get("sender", {})
             sender_id = str(sender.get("user_id", ""))
             
-            # 过滤机器人自己
             if self_id and sender_id == self_id:
                 continue
             
-            # 过滤黑名单用户
             if sender_id in blacklist:
                 continue
 
@@ -194,7 +203,6 @@ class QuotesPlugin(Star):
                 continue
 
             name = sender.get("card") or sender.get("nickname") or "未知"
-            # 存入 map，key 为文本，value 为完整消息对象（包含 time）
             valid_msgs_map[text] = m
             msgs_text.append(f"[{name}]: {text}")
         
@@ -241,39 +249,32 @@ class QuotesPlugin(Star):
             resp = await provider.text_chat(prompt, session_id=None)
             
             if not resp or not hasattr(resp, "completion_text") or not resp.completion_text:
-                yield event.plain_result("⚠️ AI 似乎拒绝了请求（可能是触发了安全过滤器），建议更换模型或重试。")
+                yield event.plain_result("⚠️ AI 似乎拒绝了请求，建议更换模型或重试。")
                 return
 
             llm_text = resp.completion_text.strip()
             
-            # [Fix] 增强的 JSON 提取逻辑
-            # 使用正则寻找最外层的 [ ... ]
+            # JSON 提取逻辑
             json_match = re.search(r"(\[.*\])", llm_text, re.DOTALL)
             
             if json_match:
                 json_str = json_match.group(1)
             else:
-                # 降级处理：尝试简单的清理
                 json_str = llm_text.replace("```json", "").replace("```", "").strip()
 
             data_list = []
             
-            # [Fix] 双重解析策略：先尝试标准 JSON，失败则尝试 Python eval (处理单引号)
             try:
-                # 尝试1: 标准 JSON
                 raw_data = json.loads(json_str)
             except json.JSONDecodeError:
                 try:
-                    # 尝试2: Python AST (可以解析 {'key': 'val'} 这种单引号格式)
                     raw_data = ast.literal_eval(json_str)
                 except Exception:
-                    # 记录原始返回以便调试
                     logger.error(f"JSON Parse Error. Raw LLM output: {llm_text}")
-                    # 判断是否是拒绝文本
                     if "cannot" in llm_text.lower() or "无法" in llm_text:
-                         yield event.plain_result("⚠️ 分析失败：AI 拒绝了该请求（可能聊天记录包含敏感内容触发了安全过滤）。")
+                         yield event.plain_result("⚠️ 分析失败：AI 拒绝了该请求。")
                     else:
-                         yield event.plain_result("⚠️ AI 返回了无效的格式，无法解析。请查看后台日志获取详细信息。")
+                         yield event.plain_result("⚠️ AI 返回了无效的格式，无法解析。")
                     return
             
             if isinstance(raw_data, list):
@@ -288,7 +289,6 @@ class QuotesPlugin(Star):
             saved_quotes: List[Quote] = []
             
             for item in data_list:
-                # 增加类型检查，防止 item 是字符串等奇怪的东西
                 if not isinstance(item, dict):
                     continue
                     
@@ -337,12 +337,12 @@ class QuotesPlugin(Star):
         except Exception as e:
             err_str = str(e)
             if "ChatCompletion" in err_str and "content=None" in err_str:
-                 yield event.plain_result("🚫 挖掘失败：AI 拒绝生成内容。这通常是因为聊天记录中包含触发 Gemini 安全过滤器的敏感词。")
+                 yield event.plain_result("🚫 挖掘失败：AI 拒绝生成内容。")
             else:
                 logger.error(f"AI Analysis Error: {e}")
                 yield event.plain_result(f"分析失败：{err_str}")
 
-    # ================= 4. 历史消息抓取 (移植版) =================
+    # ================= 4. 历史消息抓取 =================
 
     async def _fetch_next_batch_robust(self, client, group_id, cursor_seq, error_strike_ref):
         """[底层] 获取单批次消息 (防1200错误 + 指数跳跃 + 动态Batch + 熔断机制)"""
@@ -394,9 +394,6 @@ class QuotesPlugin(Star):
 
     async def _fetch_history_robust_main(self, event: AstrMessageEvent, group_id: str, total_count: int) -> List[Dict]:
         """[上层] 鲁棒性历史消息拉取主循环"""
-        if event.get_platform_name() != "aiocqhttp": 
-            return []
-        
         client = event.bot
         collected_messages = []
         cursor_seq = 0
@@ -435,27 +432,27 @@ class QuotesPlugin(Star):
     # ================= 5. 其他工具方法 =================
 
     def _force_find_provider(self, target_id: str):
-        """尝试深度查找指定的 Provider"""
+        """[Fix] 使用公开 API 查找 Provider，移除私有属性访问"""
         if not target_id:
             return None
         target_id_lower = target_id.lower()
+        
+        # 使用公开 API 获取所有 Provider
         all_providers = []
-        
-        # 尝试从注册表中获取
-        if hasattr(self.context, "register"):
-            reg_providers = getattr(self.context.register, "providers", None)
-            if isinstance(reg_providers, dict):
-                all_providers.extend(reg_providers.values())
-            elif isinstance(reg_providers, list):
-                all_providers.extend(reg_providers)
-        
-        # 尝试使用公开 API 获取
         if hasattr(self.context, "get_all_providers"):
             try:
-                all_providers.extend(self.context.get_all_providers())
+                all_providers = self.context.get_all_providers()
             except Exception:
                 pass
         
+        # 如果公开 API 失败 (旧版本兼容)，尝试回退到 register (不建议，但为了兼容性保留)
+        if not all_providers and hasattr(self.context, "register"):
+             reg_providers = getattr(self.context.register, "providers", None)
+             if isinstance(reg_providers, dict):
+                 all_providers.extend(reg_providers.values())
+             elif isinstance(reg_providers, list):
+                 all_providers.extend(reg_providers)
+
         seen = set()
         for p in all_providers:
             if not p or id(p) in seen:
