@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Tuple, Dict, Any
 from .model import Quote
 
-# --- HTML 模板常量 (Templates) ---
+# --- HTML 模板常量 ---
 
 COMMON_CSS = """
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
@@ -20,10 +20,12 @@ COMMON_CSS = """
 class QuoteRenderer:
     """视图层：负责生成 HTML 和渲染配置"""
     
+    # [新增] 用于存储默认头像的本地 URI (由 main.py 注入)
+    DEFAULT_AVATAR_URI: str = "https://foruda.gitee.com/avatar/1677741748064414527/6651576_soulter_1578959926.png"
+
     @staticmethod
     def render_single_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
         """渲染单条语录"""
-        # 阈值：超过 60 字或换行过多使用长文本模式
         is_long_text = len(q.text) > 60 or q.text.count('\n') > 4
         
         if is_long_text:
@@ -33,7 +35,6 @@ class QuoteRenderer:
 
     @staticmethod
     def _get_time_text(created_at: float) -> str:
-        """辅助方法：格式化时间"""
         try:
             dt = datetime.fromtimestamp(created_at)
             months = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", 
@@ -47,16 +48,13 @@ class QuoteRenderer:
     def _get_avatar_url(qq: str) -> str:
         """
         获取头像 URL。
-        [Fix] 增加对非 QQ 号的兼容性检查。
-        如果 qq 是纯数字，使用 QQ 头像接口；否则使用默认占位图。
         """
         if qq and qq.isdigit():
             timestamp = int(time.time())
             return f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640&v={timestamp}"
         else:
-            # 使用一个通用的默认头像 (这里使用 AstrBot 的 Logo 或其他通用图)
-            # 也可以替换为其他公共 CDN 的随机头像
-            return "https://raw.githubusercontent.com/Soulter/AstrBot/main/assets/logo.png"
+            # [修改] 优先使用注入的本地 URI，否则回退到 CDN
+            return QuoteRenderer.DEFAULT_AVATAR_URI
 
     @staticmethod
     def _render_feed_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
@@ -181,7 +179,7 @@ class QuoteRenderer:
 
     @staticmethod
     def render_merged_card(quotes: List[Quote], qq: str, name: str, show_author: bool = False) -> Tuple[str, Dict[str, Any]]:
-        """渲染合集长图 (已增强：显示时间、理由、底部栏)"""
+        """渲染合集长图"""
         avatar_url = QuoteRenderer._get_avatar_url(qq)
         safe_name = html.escape(name)
         view_width = 1000
@@ -191,21 +189,17 @@ class QuoteRenderer:
             text = html.escape(q.text)
             if not text: continue
             
-            # 字体大小适配
             item_font_size = 46 if len(q.text) < 50 else 38
             
-            # 1. 理由部分
             reason_html = ""
             if hasattr(q, "ai_reason") and q.ai_reason:
                 safe_reason = html.escape(q.ai_reason)
                 reason_html = f'<div class="ai-reason">💡 <b>Bot:</b> {safe_reason}</div>'
 
-            # 2. 底部栏 (时间 + 可选作者信息)
             time_text = QuoteRenderer._get_time_text(q.created_at)
             
             right_side_html = ""
             if show_author:
-                # 随机/AI模式：右侧显示头像和名字
                 sub_avatar_url = QuoteRenderer._get_avatar_url(q.qq)
                 right_side_html = f"""
                 <div class="footer-author-box">
@@ -214,7 +208,6 @@ class QuoteRenderer:
                 </div>
                 """
             
-            # 3. 组装单个卡片 HTML
             quotes_list_html += f"""
             <div class="card">
                 <div class="card-header"><span class="index-tag">#{i+1}</span></div>
@@ -287,7 +280,6 @@ class QuoteRenderer:
                 }}
                 .footer-time {{
                     font-size: 26px; color: #777; font-weight: 400;
-                    /* 移除了 font-family: Consolas，继承默认的 Noto Sans SC */
                 }}
                 .footer-author-box {{
                     display: flex; align-items: center;
