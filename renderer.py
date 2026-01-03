@@ -45,9 +45,18 @@ class QuoteRenderer:
 
     @staticmethod
     def _get_avatar_url(qq: str) -> str:
-        """获取带时间戳的头像 URL，强制刷新缓存"""
-        timestamp = int(time.time())
-        return f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640&v={timestamp}"
+        """
+        获取头像 URL。
+        [Fix] 增加对非 QQ 号的兼容性检查。
+        如果 qq 是纯数字，使用 QQ 头像接口；否则使用默认占位图。
+        """
+        if qq and qq.isdigit():
+            timestamp = int(time.time())
+            return f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640&v={timestamp}"
+        else:
+            # 使用一个通用的默认头像 (这里使用 AstrBot 的 Logo 或其他通用图)
+            # 也可以替换为其他公共 CDN 的随机头像
+            return "https://raw.githubusercontent.com/Soulter/AstrBot/main/assets/logo.png"
 
     @staticmethod
     def _render_feed_card(q: Quote, index: int, total: int) -> Tuple[str, Dict[str, Any]]:
